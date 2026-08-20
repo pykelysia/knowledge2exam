@@ -12,7 +12,8 @@
 | [prd.md](./prd.md) | 需求规格：功能/非功能需求、用户流程、验收标准、边界情况 | 产品、前端、后端 |
 | [architecture.md](./architecture.md) | 分层架构、模块划分、全链路时序、任务状态机 | 后端、运维 |
 | [data-model.md](./data-model.md) | 关系表结构、向量库 metadata、对象存储布局 | 后端 |
-| [api.md](./api.md) | REST 端点、请求/响应 schema、SSE 事件、错误码 | 前端、后端 |
+| [api.md](./api.md) | REST 端点（含鉴权）、请求/响应 schema、SSE 事件、错误码 | 前端、后端 |
+| [openapi.yaml](./openapi.yaml) | 接口的机器可读 OpenAPI 3.0 契约（api.md 的权威版本，供 Swagger UI / SDK 生成） | 前端、后端 |
 | [agent-design.md](./agent-design.md) | Agent 职责、Tool schema、核心算法、重试协议、提示词模板 | 后端、算法 |
 | [tech-selection.md](./tech-selection.md) | 各能力位的候选技术对比（**不含最终决定**） | 技术决策者 |
 
@@ -47,6 +48,9 @@ idea.md → prd.md → architecture.md → data-model.md → api.md → agent-de
 | 排他类 | `exclusive` | 用户本次提供后即不再引入共享库同类内容的内容类型 |
 | 叠加类 | `additive` | 无论用户是否提供都会叠加共享库同类内容的内容类型 |
 | 换题 | replan | 某题重试耗尽后，由主 agent 更换其知识点或考察方向 |
+| 访问令牌 | `access token` | 双 JWT 中短时效（15 分钟）的 JWT，随 `Authorization: Bearer` 携带，仅存前端内存 |
+| 刷新令牌 | `refresh token` | 双 JWT 中长时效（30 天）的不透明令牌，用于换取新 access token，服务端只存哈希 |
+| 刷新链族 | `family_id` | 一次登录后连续轮换产生的 refresh token 链，用于重放检测与整链吊销 |
 
 ### 内容类型（`source_type`）取值
 

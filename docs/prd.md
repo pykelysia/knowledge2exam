@@ -146,6 +146,33 @@ md 渲染为 PDF 返回给用户。中文正常显示，LaTeX 公式正确渲染
 
 验收：注入一个不被渲染器支持的宏，审查阶段将其改写为等价可渲染形式，`retry_count` 不变。
 
+### 3.6 鉴权与用户
+
+**FR-21 注册**
+用户可注册账号（邮箱 + 用户名 + 密码）。邮箱与用户名均唯一。
+
+验收：用已存在的邮箱或用户名注册返回 409 `USER_EXISTS`；成功注册后返回该用户信息。
+
+**FR-22 登录与双令牌**
+用户登录成功获得 access token 与 refresh token 各一枚。access token 短时效（15 分钟），refresh token 长时效（30 天）。
+
+验收：登录成功返回两个 token 及用户信息；access token 过期后调用业务接口返回 401 `TOKEN_EXPIRED`。
+
+**FR-23 刷新与轮换**
+用 refresh token 换取新 access token 时，同步轮换 refresh token（旧 refresh token 立即失效，签发同族新 token）。
+
+验收：刷新成功后旧 refresh token 不可再用；连续刷新得到同 `family_id` 的新 token。
+
+**FR-24 登出**
+用户登出时吊销其 refresh token，此后该 refresh token 无法再用于刷新。
+
+验收：登出后调用 `/auth/refresh` 返回 401 `REFRESH_INVALID`。
+
+**FR-25 资源归属鉴权**
+所有上传件与任务资源在读写时校验归属于当前用户，越权访问按 404 处理（不泄露资源是否存在）。
+
+验收：用户 A 访问用户 B 的 `job_id` 返回 404 `JOB_NOT_FOUND`；未携带有效 access token 返回 401。
+
 ## 4. 非功能需求
 
 **NFR-1 单任务时长**
@@ -169,9 +196,29 @@ md 渲染为 PDF 返回给用户。中文正常显示，LaTeX 公式正确渲染
 **NFR-7 数据留存与删除**
 用户可删除自己的任务及其产物。已共享并通过检测的资源不随个人任务删除而消失，因为它已进入公共知识库。此规则需在用户共享时明确告知。
 
+**NFR-8 双 JWT 安全策略**
+access token 15 分钟、前端内存不落地；refresh token 30 天、服务端仅存 SHA-256 哈希；refresh token 每次刷新时轮换，检测到重放则吊销整条链（`family_id`）的全部 token。设计见 [data-model.md](./data-model.md#8-鉴权与用户系统)。
+
 ## 5. 用户流程
 
-### 5.1 主流程
+### 5.1 注册与登录
+
+```mermaid
+sequenceDiagram
+    actor U as 用户
+    participant F as 前端
+    participant B as 后端
+
+    U->>F: 填写邮箱 / 用户名 / 密码
+    F->>B: POST /auth/register
+    B-->>F: 201 用户信息
+    U->>F: 输入凭证
+    F->>B: POST /auth/login
+    B-->>F: access_token + refresh_token
+    Note over F: access token 存内存，refresh token 存安全存储
+```
+
+### 5.2 主流程
 
 ```mermaid
 sequenceDiagram
@@ -180,11 +227,11 @@ sequenceDiagram
     participant B as 后端
 
     U->>F: 选择文件并标注内容类型
-    F->>B: POST /uploads（逐个文件）
+    F->>B: POST /uploads（逐个文件，带 Bearer）
     B-->>F: upload_id + 解析预览
     U->>F: 勾选共享项、选学校课程
     U->>F: 设置时长 / 解析开关 / 审查开关
-    F->>B: POST /jobs
+    F->>B: POST /jobs（带 Bearer）
     B-->>F: 202 job_id
     F->>B: GET /jobs/{id}/events（SSE）
     B-->>F: stage_changed: preprocessing
@@ -197,7 +244,19 @@ sequenceDiagram
     F->>B: GET /jobs/{id}/paper.pdf
 ```
 
-### 5.2 异常流程
+### 5.3 令牌刷新
+
+```mermaid
+sequenceDiagram
+    participant F as 前端
+    participant B as 后端
+
+    F->>B: POST /auth/refresh（带 refresh token）
+    B-->>F: 新 access_token + 新 refresh_token（旧 refresh 作废）
+    Note over F: access token 过期时由前端拦截 401 自动触发，透明续期
+```
+
+### 5.4 异常流程
 
 **E-1 部分文件解析失败**
 单文件解析失败 → 记录警告 → 其余文件继续 → SSE 推送 `warning` → 任务正常完成 → 结果中列出失败文件。若**全部**文件都失败且无手动输入，任务转 `failed`。
@@ -233,6 +292,11 @@ md 已生成但 PDF 渲染失败 → 任务转 `partially_completed` → md 仍�
 | 用户提供了重点清单 | 只用用户的，不参考其他来源 |
 | 选择共享但未选学校课程 | 400，共享必须有归属 |
 | 时长设置过短（如 5 分钟） | 允许，题量相应减少，但至少 1 题 |
+| 未登录调用受保护端点 | 401 `TOKEN_MISSING` |
+| access token 过期 | 401 `TOKEN_EXPIRED`，前端拦截后用 refresh token 透明续期 |
+| refresh token 已吊销/失效 | 401 `REFRESH_INVALID`，引导重新登录 |
+| refresh token 重放（复用已吊销的 token） | 401 `REFRESH_REUSE_DETECTED`，吊销整条链，重新登录 |
+| 访问他人资源 | 404，不泄露资源是否存在 |
 
 ## 7. 非目标
 
@@ -244,4 +308,6 @@ md 已生成但 PDF 渲染失败 → 任务转 `partially_completed` → md 仍�
 - 人工审核后台（安全检测为全自动）
 - 试卷的二次编辑（产出即最终，不提供改题界面）
 - 动态图片（gif 等）解析
+- 第三方登录（OAuth）、手机验证码、邮箱验证、找回密码（首版仅邮箱/用户名 + 密码）
+- 多设备独立会话管理（refresh token 链族模型下并发刷新会互相吊销，见 [data-model.md](./data-model.md#8-鉴权与用户系统)）
 

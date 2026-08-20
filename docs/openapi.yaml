@@ -1,0 +1,847 @@
+openapi: 3.0.3
+info:
+  title: knowledge2exam API
+  version: 1.0.0
+  description: |
+    试卷生成工具后端接口契约。REST + SSE，所有端点前缀 `/api/v1`。请求与响应均为 JSON，
+    除上传接口用 `multipart/form-data`。
+
+    字段命名与 [data-model.md](./data-model.md) 的列名保持一致；`source_type` 枚举见
+    [README.md](./README.md#内容类型source_type取值)。
+
+    本文件由 [api.md](./api.md) 描述的需求生成，是前后端共用的机器可读契约。
+    两个工作区（前端 / 后端）均可由此生成客户端 SDK 或服务端骨架。
+servers:
+  - url: /api/v1
+    description: 相对路径（同源部署，经反向代理去掉前缀）
+security:
+  - bearerAuth: []
+tags:
+  - name: Auth
+    description: 注册、登录、刷新与登出（FR-21~FR-24）
+  - name: Uploads
+    description: 上传与手动输入（FR-1, FR-2）
+  - name: Jobs
+    description: 生成任务、进度与产物（FR-9, FR-10, FR-18, FR-19）
+  - name: Catalog
+    description: 学校与课程列表（FR-5）
+paths:
+  /auth/register:
+    post:
+      tags: [Auth]
+      operationId: register
+      summary: 注册账号
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: 注册成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '409':
+          $ref: '#/components/responses/UserExists'
+  /auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      summary: 登录，返回双 token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: 登录成功，返回 access + refresh 双 token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthTokens'
+        '401':
+          $ref: '#/components/responses/InvalidCredentials'
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      operationId: refresh
+      summary: 刷新 access token 并轮换 refresh token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: 刷新成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthTokens'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /auth/logout:
+    post:
+      tags: [Auth]
+      operationId: logout
+      summary: 登出，吊销 refresh token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LogoutRequest'
+      responses:
+        '204':
+          description: 已登出
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /uploads:
+  /uploads:
+    post:
+      tags: [Uploads]
+      operationId: createUpload
+      summary: 上传单个文件或提交文本
+      description: |
+        两种载荷互斥：文件上传用 `multipart/form-data`，文本提交用 `application/json`。
+        `manual_text` 与 `extra_requirement` 不接受 `shareable` 字段，传入即 400（FR-4）。
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, source_type]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: 文件本体。支持 docx/doc/pptx/ppt/pdf/md/txt/jpg/jpeg/png/webp/bmp
+                source_type:
+                  $ref: '#/components/schemas/SourceTypeFile'
+                shareable:
+                  type: boolean
+                  default: false
+                  description: 是否愿意共享入知识库。仅文件类可用
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TextUploadCreate'
+      responses:
+        '201':
+          description: 上传或文本提交已受理，返回解析预览
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Upload'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+  /uploads/{upload_id}:
+    delete:
+      tags: [Uploads]
+      operationId: deleteUpload
+      summary: 删除尚未用于任务的上传件
+      parameters:
+        - $ref: '#/components/parameters/UploadId'
+      responses:
+        '204':
+          description: 已删除
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/UploadInUse'
+  /jobs:
+    post:
+      tags: [Jobs]
+      operationId: createJob
+      summary: 创建生成任务
+      description: 立即返回 `job_id`（202），生成异步进行（FR-9）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JobCreate'
+      responses:
+        '202':
+          description: 任务已受理
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /jobs/{job_id}:
+    get:
+      tags: [Jobs]
+      operationId: getJob
+      summary: 任务快照（轮询降级用）
+      description: 与 SSE 状态一致（FR-10）。`last_event_seq` 可用于 SSE 重连续传。
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: 任务当前快照
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '404':
+          $ref: '#/components/responses/JobNotFound'
+    delete:
+      tags: [Jobs]
+      operationId: deleteJob
+      summary: 删除任务及产物
+      description: 级联规则见 [data-model.md](./data-model.md#7-数据删除)——已共享资源不随之删除。
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '204':
+          description: 已删除
+        '404':
+          $ref: '#/components/responses/JobNotFound'
+  /jobs/{job_id}/events:
+    get:
+      tags: [Jobs]
+      operationId: streamJobEvents
+      summary: SSE 进度流
+      description: |
+        `Content-Type: text/event-stream`。每帧含 `id`（对应 `job_stage.seq`）、`event`、`data`。
+        客户端断连后用 `Last-Event-ID` 头重连，服务端从该 `seq` 之后补发（FR-10）。
+        事件类型与 `data` 结构见 [api.md](./api.md#6-sse-事件)。
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+        - name: Last-Event-ID
+          in: header
+          required: false
+          description: 断线重连续传：服务端从该 seq 之后补发事件
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: SSE 事件流
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: "按 `id: <seq>\\nevent: <type>\\ndata: <json>\\n\\n` 帧序列"
+        '404':
+          $ref: '#/components/responses/JobNotFound'
+  /jobs/{job_id}/questions:
+    get:
+      tags: [Jobs]
+      operationId: listQuestions
+      summary: 已产出的题目列表
+      description: 生成过程中可调用，返回当前已完成的部分。
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: 题目列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuestionsResponse'
+        '404':
+          $ref: '#/components/responses/JobNotFound'
+  /jobs/{job_id}/paper.md:
+    get:
+      tags: [Jobs]
+      operationId: downloadPaperMarkdown
+      summary: 下载 md 试卷
+      description: 题卷在前，答案与解析单独成篇。
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: Markdown 试卷
+          content:
+            text/markdown:
+              schema:
+                type: string
+        '404':
+          $ref: '#/components/responses/JobNotFound'
+        '409':
+          $ref: '#/components/responses/JobNotReady'
+  /jobs/{job_id}/paper.pdf:
+    get:
+      tags: [Jobs]
+      operationId: downloadPaperPdf
+      summary: 下载 PDF 试卷
+      description: |
+        任务未到 `rendering` 完成时返回 409；`partially_completed` 且 PDF 渲染失败时返回 409 `RENDER_FAILED`。
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: PDF 试卷
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        '404':
+          $ref: '#/components/responses/JobNotFound'
+        '409':
+          $ref: '#/components/responses/JobNotReady'
+  /jobs/{job_id}/cancel:
+    post:
+      tags: [Jobs]
+      operationId: cancelJob
+      summary: 取消运行中的任务
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '204':
+          description: 已发出取消
+        '404':
+          $ref: '#/components/responses/JobNotFound'
+        '409':
+          $ref: '#/components/responses/JobAlreadyFinished'
+  /schools:
+    get:
+      tags: [Catalog]
+      operationId: listSchools
+      summary: 学校列表
+      security: []
+      responses:
+        '200':
+          description: 学校列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SchoolsResponse'
+  /schools/{school_id}/courses:
+    get:
+      tags: [Catalog]
+      operationId: listCourses
+      summary: 某学校的课程列表
+      security: []
+      parameters:
+        - name: school_id
+          in: path
+          required: true
+          description: 学校 ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 课程列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CoursesResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: access token（双 JWT 中的短时效令牌，15 分钟）。refresh token 不用于此，仅在 /auth/refresh 与 /auth/logout 的请求体中出现。
+  parameters:
+    UploadId:
+      name: upload_id
+      in: path
+      required: true
+      description: 上传件 ID
+      schema:
+        type: string
+        format: uuid
+    JobId:
+      name: job_id
+      in: path
+      required: true
+      description: 任务 ID
+      schema:
+        type: string
+        format: uuid
+  responses:
+    BadRequest:
+      description: 请求参数或载荷不合法
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: 资源不存在
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    JobNotFound:
+      description: 任务不存在或无权访问
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    PayloadTooLarge:
+      description: 超出文件大小上限
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    UploadInUse:
+      description: 上传件已被任务引用，不可删除
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    JobNotReady:
+      description: 产物尚未生成，或 PDF 渲染失败
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    JobAlreadyFinished:
+      description: 任务已终结，不可取消
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    UserExists:
+      description: 邮箱或用户名已被注册
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    InvalidCredentials:
+      description: 登录凭证错误
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: 未携带有效 access token，或 refresh token 已吊销/过期/重放
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+  schemas:
+    RegisterRequest:
+      type: object
+      required: [email, username, password]
+      properties:
+        email:
+          type: string
+          format: email
+        username:
+          type: string
+          minLength: 1
+          maxLength: 32
+        password:
+          type: string
+          minLength: 8
+    LoginRequest:
+      type: object
+      required: [password]
+      description: "`email` 与 `username` 二选一，优先 email。"
+      properties:
+        email:
+          type: string
+          format: email
+          nullable: true
+        username:
+          type: string
+          nullable: true
+        password:
+          type: string
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+    LogoutRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+    User:
+      type: object
+      required: [user_id, email, username]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        username:
+          type: string
+    UserResponse:
+      type: object
+      required: [user]
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+    AuthTokens:
+      type: object
+      required: [access_token, refresh_token, expires_in]
+      properties:
+        access_token:
+          type: string
+          description: JWT，15 分钟时效
+        refresh_token:
+          type: string
+          description: 不透明令牌，30 天时效，服务端存 SHA-256 哈希
+        expires_in:
+          type: integer
+          description: access token 有效期（秒）
+        user:
+          $ref: '#/components/schemas/User'
+    SourceTypeFile:
+      type: string
+      description: 文件类内容类型
+      enum: [book, lecture, note, keypoint_list, past_paper]
+    SourceTypeFile:
+      type: string
+      description: 文件类内容类型
+      enum: [book, lecture, note, keypoint_list, past_paper]
+    SourceType:
+      type: string
+      description: 全部内容类型（含手动输入）
+      enum: [book, lecture, note, keypoint_list, past_paper, manual_text, extra_requirement]
+    TextUploadCreate:
+      type: object
+      required: [source_type, raw_text]
+      description: 手动输入文本提交。`source_type` 仅限 manual_text / extra_requirement，不接受 `shareable`。
+      properties:
+        source_type:
+          type: string
+          enum: [manual_text, extra_requirement]
+        raw_text:
+          type: string
+          description: 文本正文
+    Preview:
+      type: object
+      description: 解析预览
+      properties:
+        char_count:
+          type: integer
+          description: 解析出的字符数
+        page_count:
+          type: integer
+          description: 页数（PDF/PPT），无页概念时为 null
+        excerpt:
+          type: string
+          description: 正文摘录
+    Upload:
+      type: object
+      description: 上传件（响应）
+      required: [upload_id, source_type, parse_status]
+      properties:
+        upload_id:
+          type: string
+          format: uuid
+        source_type:
+          $ref: '#/components/schemas/SourceType'
+        filename:
+          type: string
+          nullable: true
+          description: 文件名，手动输入时为 null
+        size_bytes:
+          type: integer
+          nullable: true
+          description: 文件大小，手动输入时为 null
+        shareable:
+          type: boolean
+        parse_status:
+          type: string
+          enum: [succeeded, failed]
+          description: 解析失败仍返回 201 并置 failed 与 parse_error（NFR-5）
+        parse_error:
+          type: string
+          nullable: true
+        preview:
+          $ref: '#/components/schemas/Preview'
+    JobCreate:
+      type: object
+      description: 创建任务请求
+      properties:
+        upload_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          default: []
+          description: 本次使用的上传件；为空且无任何文本类上传件时返回 400 INPUT_EMPTY（FR-3）
+        school_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: 有共享项或需读共享库时必填
+        course_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: 同上
+        duration_minutes:
+          type: integer
+          minimum: 5
+          maximum: 300
+          default: 100
+          description: 考试时长（FR-7）
+        need_explanation:
+          type: boolean
+          default: false
+          description: 是否生成解析（FR-6）
+        enable_review:
+          type: boolean
+          default: false
+          description: 是否启用审查（FR-8）
+    JobAccepted:
+      type: object
+      required: [job_id, status, created_at]
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [pending]
+        created_at:
+          type: string
+          format: date-time
+          description: ISO 8601 UTC，带 Z
+    Plan:
+      type: object
+      description: 规划概要
+      properties:
+        total:
+          type: integer
+        distribution:
+          type: object
+          properties:
+            choice:
+              type: integer
+            blank:
+              type: integer
+            short_answer:
+              type: integer
+    Progress:
+      type: object
+      properties:
+        completed:
+          type: integer
+        total:
+          type: integer
+        retried:
+          type: integer
+        replanned:
+          type: integer
+        abandoned:
+          type: integer
+    Warning:
+      type: object
+      properties:
+        code:
+          type: string
+          enum: [PARSE_FAILED, MODERATION_REJECTED]
+        upload_id:
+          type: string
+          format: uuid
+          nullable: true
+        message:
+          type: string
+    Artifacts:
+      type: object
+      description: 产物下载地址
+      properties:
+        md_url:
+          type: string
+          nullable: true
+          description: 相对路径，如 /api/v1/jobs/{job_id}/paper.md
+        pdf_url:
+          type: string
+          nullable: true
+    Job:
+      type: object
+      description: 任务快照
+      required: [job_id, status, created_at]
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/JobStatus'
+        stage:
+          $ref: '#/components/schemas/Stage'
+        duration_minutes:
+          type: integer
+        need_explanation:
+          type: boolean
+        enable_review:
+          type: boolean
+        plan:
+          $ref: '#/components/schemas/Plan'
+        progress:
+          $ref: '#/components/schemas/Progress'
+        warnings:
+          type: array
+          items:
+            $ref: '#/components/schemas/Warning'
+        artifacts:
+          $ref: '#/components/schemas/Artifacts'
+        last_event_seq:
+          type: integer
+          description: SSE 续传游标
+        error_code:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+    JobStatus:
+      type: string
+      enum: [pending, preprocessing, planning, generating, reviewing, rendering, completed, partially_completed, failed, cancelled]
+      description: 见 architecture.md 任务状态机
+    Stage:
+      type: string
+      enum: [preprocessing, planning, generating, reviewing, rendering]
+    Question:
+      type: object
+      description: 一道题目。`need_explanation=false` 时 `explanation` 不出现；简答题子问题与子答案按索引严格对应。
+      required: [seq, question_type, stem, answer]
+      properties:
+        seq:
+          type: integer
+          description: 试卷内题号
+        question_type:
+          type: string
+          enum: [choice, blank, short_answer]
+        stem:
+          type: string
+        options:
+          type: object
+          nullable: true
+          description: 选择题选项，键为 A/B/C/D
+          additionalProperties:
+            type: string
+        answer:
+          type: string
+        explanation:
+          type: string
+          nullable: true
+        sub_questions:
+          type: array
+          nullable: true
+          items:
+            type: string
+        sub_answers:
+          type: array
+          nullable: true
+          items:
+            type: string
+    QuestionsResponse:
+      type: object
+      required: [job_id, total, questions]
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        need_explanation:
+          type: boolean
+        total:
+          type: integer
+        questions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Question'
+    SchoolsResponse:
+      type: object
+      required: [schools]
+      properties:
+        schools:
+          type: array
+          items:
+            $ref: '#/components/schemas/School'
+    School:
+      type: object
+      required: [school_id, name]
+      properties:
+        school_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+    CoursesResponse:
+      type: object
+      required: [courses]
+      properties:
+        courses:
+          type: array
+          items:
+            $ref: '#/components/schemas/Course'
+    Course:
+      type: object
+      required: [course_id, name]
+      properties:
+        course_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        shared_resource_count:
+          type: integer
+          description: 该课程共享库资源数，供用户判断是否有内容可用
+    ErrorResponse:
+      type: object
+      required: [error_code, message]
+      properties:
+        error_code:
+          $ref: '#/components/schemas/ErrorCode'
+        message:
+          type: string
+        detail:
+          type: object
+          additionalProperties: true
+          description: 结构化的补充信息，随错误码不同而异
+    ErrorCode:
+      type: string
+      description: |
+        错误码全集（含仅作为 warning/error 事件出现、无 HTTP 状态的码）。
+        HTTP 状态与前端建议动作见 api.md 第 10 节。
+      enum:
+        - INPUT_EMPTY
+        - UNSUPPORTED_FORMAT
+        - FILE_TOO_LARGE
+        - PDF_ENCRYPTED
+        - SHARE_NOT_ALLOWED
+        - SHARE_SCOPE_REQUIRED
+        - INVALID_DURATION
+        - JOB_NOT_FOUND
+        - UPLOAD_IN_USE
+        - JOB_NOT_READY
+        - JOB_ALREADY_FINISHED
+        - PARSE_FAILED
+        - MODERATION_REJECTED
+        - PLANNING_FAILED
+        - GENERATION_EXHAUSTED
+        - RENDER_FAILED
+        - MODEL_UNAVAILABLE
+        - RATE_LIMITED
+        - USER_EXISTS
+        - INVALID_CREDENTIALS
+        - TOKEN_MISSING
+        - TOKEN_EXPIRED
+        - REFRESH_INVALID
+        - REFRESH_REUSE_DETECTED

@@ -273,7 +273,7 @@ def validate_short_answer(args: dict) -> None:
         raise SchemaInvalid(f"sub_questions 长度 {len(sub_q)} 与 sub_answers 长度 {len(sub_a)} 不一致")
 ```
 
-`SchemaInvalid` 对应 [api.md](./api.md#5-sse-事件) 中 `question_retried` 事件的 `reason: "schema_invalid"`，不计入 3 次上限，直接要求模型修正后重发。
+`SchemaInvalid` 对应 [api.md](./api.md#6-sse-事件) 中 `question_retried` 事件的 `reason: "schema_invalid"`，不计入 3 次上限，直接要求模型修正后重发。
 
 ## 8. 审查 agent 规则
 

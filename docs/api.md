@@ -4,10 +4,16 @@ REST + SSE。所有端点前缀 `/api/v1`。请求与响应均为 JSON，除上�
 
 字段命名与 [data-model.md](./data-model.md) 的列名保持一致；`source_type` 枚举见 [README.md](./README.md#内容类型source_type取值)。
 
+> **机器可读契约**：本接口的完整 OpenAPI 3.0 描述见 [openapi.yaml](./openapi.yaml)。它是前后端共用的唯一契约来源——两个工作区（前端、后端）均可由它生成客户端 SDK / 服务端骨架，或直接用于 Swagger UI 渲染。本文档为人类可读说明，[openapi.yaml](./openapi.yaml) 为权威版本；二者不一致时以 openapi.yaml 为准。
+
 ## 1. 端点总览
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
+| POST | `/auth/register` | 注册账号 |
+| POST | `/auth/login` | 登录，返回 access + refresh 双 token |
+| POST | `/auth/refresh` | 刷新 access token，并轮换 refresh token |
+| POST | `/auth/logout` | 登出，吊销 refresh token |
 | POST | `/uploads` | 上传单个文件或提交文本，返回 `upload_id` 与解析预览 |
 | DELETE | `/uploads/{upload_id}` | 删除尚未用于任务的上传件 |
 | POST | `/jobs` | 创建生成任务，返回 `job_id` |
@@ -21,7 +27,92 @@ REST + SSE。所有端点前缀 `/api/v1`。请求与响应均为 JSON，除上�
 | GET | `/schools` | 学校列表 |
 | GET | `/schools/{school_id}/courses` | 某学校的课程列表 |
 
-## 2. 上传
+## 2. 鉴权与用户
+
+双 JWT 鉴权。access token 15 分钟短时效，refresh token 30 天长时效，每次刷新时轮换。重放检测与 `family_id` 机制见 [data-model.md](./data-model.md#8-鉴权与用户系统)。
+
+### POST /auth/register
+
+```json
+{
+  "email": "user@example.com",
+  "username": "zhangsan",
+  "password": "password123"
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `email` | string | 是 | 唯一，格式校验 |
+| `username` | string | 是 | 唯一，1~32 字符 |
+| `password` | string | 是 | 至少 8 字符 |
+
+响应 `201`：
+
+```json
+{
+  "user": {"user_id": "a1b2...", "email": "user@example.com", "username": "zhangsan"}
+}
+```
+
+邮箱或用户名已存在返回 409 `USER_EXISTS`。
+
+### POST /auth/login
+
+`username` 与 `email` 二选一（至少提供一个，优先 `email`）：
+
+```json
+{
+  "email": "user@example.com",
+  "username": null,
+  "password": "password123"
+}
+```
+
+响应 `200`：
+
+```json
+{
+  "access_token": "eyJhbGci...",
+  "refresh_token": "dGhpcyBpcyBh...",
+  "expires_in": 900,
+  "user": {"user_id": "a1b2...", "email": "user@example.com", "username": "zhangsan"}
+}
+```
+
+`expires_in` 单位为秒，供前端计算自动刷新时机。凭证错误返回 401 `INVALID_CREDENTIALS`。
+
+### POST /auth/refresh
+
+```json
+{
+  "refresh_token": "dGhpcyBpcyBh..."
+}
+```
+
+响应 `200`：
+
+```json
+{
+  "access_token": "eyJhbGci...",
+  "refresh_token": "bmV3IHJlZnJl...",
+  "expires_in": 900
+}
+```
+
+旧 refresh token 立即吊销，新 token 同 `family_id`。refresh token 已吊销/过期返回 401 `REFRESH_INVALID`；检测到重放（已吊销的 token 被再次使用）返回 401 `REFRESH_REUSE_DETECTED`，整条链全部吊销。
+
+### POST /auth/logout
+
+```json
+{
+  "refresh_token": "bmV3IHJlZnJl..."
+}
+```
+
+响应 `204`，该 refresh token 被标记 `revoked_at`，不可再用于刷新。access token 在接下来 ≤15 分钟内仍有效，不做主动失效。
+
+## 3. 上传
 
 ### POST /uploads
 
@@ -68,7 +159,7 @@ REST + SSE。所有端点前缀 `/api/v1`。请求与响应均为 JSON，除上�
 
 删除尚未被任务引用的上传件。已被任务引用时返回 409。
 
-## 3. 创建任务
+## 4. 创建任务
 
 ### POST /jobs
 
@@ -106,7 +197,7 @@ REST + SSE。所有端点前缀 `/api/v1`。请求与响应均为 JSON，除上�
 }
 ```
 
-## 4. 任务快照
+## 5. 任务快照
 
 ### GET /jobs/{job_id}
 
@@ -161,7 +252,7 @@ REST + SSE。所有端点前缀 `/api/v1`。请求与响应均为 JSON，除上�
 }
 ```
 
-## 5. SSE 事件
+## 6. SSE 事件
 
 ### GET /jobs/{job_id}/events
 
@@ -299,7 +390,7 @@ event: error
 data: {"error_code": "PLANNING_FAILED", "message": "规划阶段连续失败，无法产出题目计划"}
 ```
 
-## 6. 题目列表
+## 7. 题目列表
 
 ### GET /jobs/{job_id}/questions
 
@@ -352,7 +443,7 @@ data: {"error_code": "PLANNING_FAILED", "message": "规划阶段连续失败，�
 
 `sub_questions` 与 `sub_answers` **按索引严格对应**（idea.md 明确要求）。`need_explanation` 为 `false` 时所有 `explanation` 字段不出现。
 
-## 7. 产物下载
+## 8. 产物下载
 
 ### GET /jobs/{job_id}/paper.md
 
@@ -366,7 +457,7 @@ data: {"error_code": "PLANNING_FAILED", "message": "规划阶段连续失败，�
 
 md 结构见 [agent-design.md](./agent-design.md#10-md-合成规范)：题卷在前，答案与解析单独成篇。
 
-## 8. 取消与删除
+## 9. 取消与删除
 
 ### POST /jobs/{job_id}/cancel
 
@@ -376,7 +467,7 @@ md 结构见 [agent-design.md](./agent-design.md#10-md-合成规范)：题卷在
 
 删除任务与产物。级联规则见 [data-model.md](./data-model.md#7-数据删除)——已共享的资源不随之删除。
 
-## 9. 学校与课程
+## 10. 学校与课程
 
 ### GET /schools
 
@@ -393,7 +484,7 @@ md 结构见 [agent-design.md](./agent-design.md#10-md-合成规范)：题卷在
 
 `shared_resource_count` 让用户判断该课程的共享库是否有内容可用。
 
-## 10. 错误码
+## 11. 错误码
 
 统一错误响应：
 
@@ -425,12 +516,18 @@ md 结构见 [agent-design.md](./agent-design.md#10-md-合成规范)：题卷在
 | `RENDER_FAILED` | 409 | PDF 渲染失败 | 提供 md 下载作为替代 |
 | `MODEL_UNAVAILABLE` | 503 | LLM 服务不可用 | 稍后重试 |
 | `RATE_LIMITED` | 429 | 超出速率限制 | 按 `Retry-After` 退避 |
+| `USER_EXISTS` | 409 | 邮箱或用户名已被注册 | 提示换一个 |
+| `INVALID_CREDENTIALS` | 401 | 登录凭证错误 | 提示用户重输 |
+| `TOKEN_MISSING` | 401 | 未携带 access token | 前端中间件拦截，重定向登录 |
+| `TOKEN_EXPIRED` | 401 | access token 已过期 | 前端自动用 refresh token 续期，刷新后重放原请求 |
+| `REFRESH_INVALID` | 401 | refresh token 已吊销/过期 | 清除本地 token，引导重新登录 |
+| `REFRESH_REUSE_DETECTED` | 401 | 检测到重放（已吊销 token 被复用） | 吊销整条链，强制重新登录；提示安全问题 |
 
 `PARSE_FAILED`、`MODERATION_REJECTED` 无 HTTP 状态，因为它们只作为 `warning` 事件或 `job.warnings` 出现，不构成请求失败（FR-16、NFR-5）。`PLANNING_FAILED`、`GENERATION_EXHAUSTED` 同理，出现在 `error` 事件与 `job.error_code` 中。
 
-## 11. 约定
+## 12. 约定
 
 - 时间戳统一 ISO 8601 UTC，带 `Z`
 - 所有 ID 为 UUID 字符串
 - 分页暂不需要（单用户任务量有限），将来加则用 `cursor` + `limit`
-- 鉴权方式 【待定】，所有 `/jobs` 与 `/uploads` 端点需校验资源归属于当前用户
+- 鉴权采用双 JWT（见第 2 节），除 `/auth/*` 与 `GET /schools`、`GET /schools/{school_id}/courses` 外，所有端点需携带有效 access token；`/uploads`、`/jobs` 及子资源还需校验资源归属于当前用户
