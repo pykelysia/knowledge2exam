@@ -1,0 +1,107 @@
+import { useEffect, useRef, useState } from 'react'
+import { getAccessToken } from '@/lib/token'
+import type { JobEvent, JobEventType } from '@/api/types'
+
+const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '/api/v1'
+
+export type EventHandler = (type: JobEventType, data: JobEvent['data'], seq?: number) => void
+
+interface UseJobStreamOptions {
+  jobId: string | null
+  onEvent: EventHandler
+}
+
+/**
+ * 订阅任务 SSE 进度流（FR-10）。
+ * 用原生 EventSource 读取，因为 axios 不解析流式响应。
+ * 断连后依赖浏览器自动重连；Last-Event-ID 由 EventSource 在重连时自动携带。
+ */
+export function useJobStream({ jobId, onEvent }: UseJobStreamOptions) {
+  const [connectionState, setConnectionState] = useState<'idle' | 'connecting' | 'open' | 'closed'>(
+    'idle',
+  )
+  const [error, setError] = useState<string | null>(null)
+  const onEventRef = useRef(onEvent)
+  onEventRef.current = onEvent
+
+  useEffect(() => {
+    if (!jobId) {
+      setConnectionState('idle')
+      return
+    }
+
+    let es: EventSource | null = null
+    let disposed = false
+    let url = `${BASE_URL}/jobs/${jobId}/events`
+
+    // EventSource 无法自定义 Authorization 头，故在同源代理场景下把 access token
+    // 作为查询参数兜底（生产建议由网关注入 Cookie/令牌或改为 fetch 流式解析）。
+    const token = getAccessToken()
+    if (token) {
+      url += `${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`
+    }
+    // 服务端通过 Last-Event-ID 头续传；EventSource 重连时会自动带上最近收到的 id。
+
+    setConnectionState('connecting')
+    setError(null)
+
+    try {
+      es = new EventSource(url)
+    } catch {
+      setConnectionState('closed')
+      setError('无法建立进度连接')
+      return
+    }
+
+    es.onopen = () => {
+      if (!disposed) setConnectionState('open')
+    }
+
+    es.onerror = () => {
+      if (!disposed) {
+        setConnectionState('closed')
+        setError('进度连接中断，将自动重连')
+      }
+    }
+
+    // 每个事件类型各挂一个监听器；data 为 JSON 字符串。
+    const eventTypes: JobEventType[] = [
+      'stage_changed',
+      'plan_ready',
+      'question_completed',
+      'question_retried',
+      'question_replanned',
+      'question_abandoned',
+      'review_result',
+      'warning',
+      'done',
+      'error',
+    ]
+
+    const listeners: Array<[string, (e: MessageEvent) => void]> = eventTypes.map((type) => {
+      const handler = (e: MessageEvent) => {
+        try {
+          const data = JSON.parse(e.data as string) as JobEvent['data']
+          const seq = (e as MessageEvent & { lastEventId?: string }).lastEventId
+            ? Number((e as MessageEvent & { lastEventId?: string }).lastEventId)
+            : undefined
+          onEventRef.current(type, data, Number.isFinite(seq) ? seq : undefined)
+        } catch {
+          // 忽略无法解析的帧。
+        }
+      }
+      es?.addEventListener(type, handler)
+      return [type, handler]
+    })
+
+    return () => {
+      disposed = true
+      listeners.forEach(([type, handler]) => es?.removeEventListener(type, handler))
+      es?.close()
+      es = null
+    }
+    // lastEventSeq 不参与依赖，避免重建连接；仅作初始游标记录。
+  }, [jobId])
+
+  return { connectionState, error }
+}
