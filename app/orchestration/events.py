@@ -1,0 +1,68 @@
+"""进度事件总线（architecture.md 第 7 节）。
+
+事件写入 `job_stage` 表（持久化），同时通过进程内 pub/sub 推送给 SSE 订阅者。
+`seq` 单调递增，供 SSE 断线重连（`Last-Event-ID`）补发。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import uuid
+from collections import defaultdict
+from typing import Any
+
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.job import JobStage
+
+# job_id -> 该任务的活跃订阅者队列集合
+_subscribers: dict[uuid.UUID, set[asyncio.Queue]] = defaultdict(set)
+
+
+class EventBus:
+    """向某个任务追加事件并广播。"""
+
+    def __init__(self, db: AsyncSession) -> None:
+        self.db = db
+
+    async def emit(
+        self, job_id: uuid.UUID, event_type: str, data: dict[str, Any], stage: str | None = None
+    ) -> int:
+        """落盘一条事件，返回其 seq。"""
+        # 计算下一个 seq
+        max_seq = await self.db.scalar(
+            select(func.coalesce(func.max(JobStage.seq), 0)).where(JobStage.job_id == job_id)
+        )
+        seq = (max_seq or 0) + 1
+
+        self.db.add(
+            JobStage(
+                job_id=job_id,
+                stage=stage or "",
+                event_type=event_type,
+                payload=data,
+                seq=seq,
+            )
+        )
+        await self.db.flush()
+
+        # 广播给订阅者
+        for q in list(_subscribers.get(job_id, set())):
+            q.put_nowait({"seq": seq, "event": event_type, "data": data})
+        return seq
+
+
+def subscribe(job_id: uuid.UUID) -> asyncio.Queue:
+    """注册一个 SSE 订阅者，返回其专属队列。"""
+    q: asyncio.Queue = asyncio.Queue()
+    _subscribers[job_id].add(q)
+    return q
+
+
+def unsubscribe(job_id: uuid.UUID, q: asyncio.Queue) -> None:
+    _subscribers.get(job_id, set()).discard(q)
+
+
+def has_subscribers(job_id: uuid.UUID) -> bool:
+    return bool(_subscribers.get(job_id))

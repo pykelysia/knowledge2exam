@@ -1,0 +1,49 @@
+"""应用配置。
+
+全部配置项支持通过环境变量（或 `.env` 文件）覆盖，字段名对应大写环境变量名，
+例如 `database_url` 对应 `DATABASE_URL`。
+"""
+
+from __future__ import annotations
+
+from functools import lru_cache
+from pathlib import Path
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # 数据库
+    database_url: str = "postgresql+asyncpg://k2e:k2e@localhost:5433/knowledge2exam"
+
+    # 双 JWT
+    jwt_secret: str = "dev-only-change-me-in-production"
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = 15
+    refresh_token_expire_days: int = 30
+
+    # 对象存储（首版为本地文件系统）
+    storage_dir: Path = Path("./storage")
+
+    # 上传限制
+    max_upload_size_bytes: int = 50 * 1024 * 1024  # 50 MB
+
+    # CORS
+    cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
+
+    # 模拟 pipeline 的步进间隔（秒），用于本地演示 SSE 进度
+    mock_stage_delay_seconds: float = 0.5
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+
+settings = get_settings()

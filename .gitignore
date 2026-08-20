@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 环境与配置
+.env
+.env.local
+
+# 本地存储（上传文件 / 产物）
+storage/
+
+# 工具
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
