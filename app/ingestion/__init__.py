@@ -1,8 +1,21 @@
-"""能力层：入（解析 / OCR / 切块 / 嵌入）。
+"""能力层：入（解析 / OCR / 切块 / 嵌入）。"""
 
-首版 stub，接口见 architecture.md 第 2 节模块划分。
-"""
+from __future__ import annotations
 
-from app.ingestion.parsers.base import Parser, StubParser
+from app.ingestion.chunking import Chunk, Chunker
+from app.ingestion.embedding import EmbeddingClient
+from app.ingestion.ocr import VisionLLMOCR
+from app.ingestion.parsers import get_parser
+from app.ingestion.parsers.base import SUPPORTED_EXTENSIONS, Parser, ParseResult, StubParser
 
-__all__ = ["Parser", "StubParser"]
+__all__ = [
+    "Parser",
+    "ParseResult",
+    "StubParser",
+    "SUPPORTED_EXTENSIONS",
+    "get_parser",
+    "Chunk",
+    "Chunker",
+    "EmbeddingClient",
+    "VisionLLMOCR",
+]
