@@ -109,13 +109,27 @@ async def generate_single_question(
 
     user_prompt = f"请根据上述规划信息生成第 {plan_item.seq} 题的题目内容。"
 
-    args = await _call_writer_llm(
-        model=model,
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-        tool_name=tool_name,
-        need_explanation=need_explanation,
-    )
+    try:
+        args = await _call_writer_llm(
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            tool_name=tool_name,
+            need_explanation=need_explanation,
+        )
+    except Exception as exc:
+        # 写入 retry_log（LLM 失败不计入 retry_count，因为没有 question 对象）
+        log = RetryLog(
+            question_id=None,
+            plan_item_id=plan_item.id,
+            attempt=retry_count,
+            reason="generation_failed",
+            counted=False,
+            detail={"error": str(exc), "model": model},
+        )
+        db.add(log)
+        await db.flush()
+        raise GenerationError(f"生成第 {plan_item.seq} 题失败: {exc}") from exc
 
     # 构造 Question ORM
     q = Question(
@@ -145,6 +159,7 @@ async def generate_choice_all(
     model: str,
     knowledge_context: str,
     bus: Any,
+    retry_count_map: dict[uuid.UUID, int] | None = None,
 ) -> list[Question]:
     """选择题 agent：包全部选择题。"""
     questions: list[Question] = []
@@ -156,6 +171,7 @@ async def generate_choice_all(
             need_explanation=need_explanation,
             model=model,
             knowledge_context=knowledge_context,
+            retry_count=retry_count_map.get(plan_item.id, 0) if retry_count_map else 0,
         )
         questions.append(q)
         if bus:
@@ -182,6 +198,7 @@ async def generate_blank_all(
     model: str,
     knowledge_context: str,
     bus: Any,
+    retry_count_map: dict[uuid.UUID, int] | None = None,
 ) -> list[Question]:
     """填空题 agent：包全部填空题。"""
     questions: list[Question] = []
@@ -193,6 +210,7 @@ async def generate_blank_all(
             need_explanation=need_explanation,
             model=model,
             knowledge_context=knowledge_context,
+            retry_count=retry_count_map.get(plan_item.id, 0) if retry_count_map else 0,
         )
         questions.append(q)
         if bus:
@@ -219,6 +237,7 @@ async def generate_short_single(
     model: str,
     knowledge_context: str,
     bus: Any,
+    retry_count_map: dict[uuid.UUID, int] | None = None,
 ) -> Question:
     """简答题 agent：每题一个 agent。"""
     q = await generate_single_question(
@@ -228,6 +247,7 @@ async def generate_short_single(
         need_explanation=need_explanation,
         model=model,
         knowledge_context=knowledge_context,
+        retry_count=retry_count_map.get(plan_item.id, 0) if retry_count_map else 0,
     )
     if bus:
         await bus.emit(
