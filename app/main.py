@@ -7,7 +7,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api import auth, catalog, jobs, uploads
+from app.api import artifacts, auth, catalog, jobs, uploads
 from app.config import settings
 from app.core.exceptions import AppException, ErrorCode
 from app.schemas.common import ErrorResponse
@@ -31,6 +31,7 @@ API_PREFIX = "/api/v1"
 app.include_router(auth.router, prefix=API_PREFIX)
 app.include_router(uploads.router, prefix=API_PREFIX)
 app.include_router(jobs.router, prefix=API_PREFIX)
+app.include_router(artifacts.router, prefix=API_PREFIX)
 app.include_router(catalog.router, prefix=API_PREFIX)
 
 
