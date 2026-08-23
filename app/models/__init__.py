@@ -7,6 +7,7 @@ Alembic 的 autogenerate 依赖 `Base.metadata`，因此必须在迁移环境导
 from app.models.auth import RefreshToken
 from app.models.base import Base
 from app.models.catalog import Course, School
+from app.models.chunk import Chunk
 from app.models.job import Job, JobStage, JobUpload
 from app.models.llm_call import LlmCall
 from app.models.moderation import ModerationRecord
@@ -24,6 +25,7 @@ __all__ = [
     "Course",
     "Upload",
     "Resource",
+    "Chunk",
     "ModerationRecord",
     "Job",
     "JobUpload",
