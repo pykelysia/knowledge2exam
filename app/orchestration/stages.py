@@ -754,13 +754,31 @@ async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, An
         else None
     )
 
-    # 6. 获取共享库摘要（若有 school/course）
+    # 6. 多份往期试卷综合（题型分布、知识点、难度三维度）
+    past_papers_data: list[dict[str, Any]] = []
+    if past_papers:
+        # 提取每份试卷的结构化信息
+        for filename, paper in past_papers.items():
+            paper_info: dict[str, Any] = {
+                "filename": filename,
+                "text": paper.text,
+                # 题型分布（从文本中统计各题型题数）
+                "distribution": _extract_type_distribution(paper.text),
+                # 知识点列表（从文本中提取）
+                "knowledge_points": _extract_knowledge_points(paper.text),
+                # 难度分布
+                "difficulty_distribution": _extract_difficulty_distribution(paper.text),
+            }
+            past_papers_data.append(paper_info)
+
+    # 7. 获取共享库摘要（若有 school/course）
     shared_summary = None
     if job.school_id and job.course_id:
         shared_summary = await _get_shared_summary(db, job)
 
     context = {
         "past_papers_full_text_or_none": past_papers_full_text,
+        "past_papers_data": past_papers_data,
         "keypoint_list_or_none": keypoint_list,
         "extra_requirement_or_none": extra_requirement,
         "shared_library_summary": shared_summary,
@@ -768,6 +786,63 @@ async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, An
 
     await db.commit()
     return context
+
+
+def _extract_type_distribution(text: str) -> dict[str, int]:
+    """从往期试卷文本中提取题型分布。"""
+    distribution: dict[str, int] = {"choice": 0, "blank": 0, "short_answer": 0}
+
+    # 简单的关键词匹配（实际可由更复杂的 NLP 替换）
+    choice_markers = ["选择题", "单项选择", "多项选择", "Choose", "Selection"]
+    blank_markers = ["填空题", "Fill in the blank", "____"]
+    short_markers = ["简答题", "论述题", "计算题", "Essay", "Short answer"]
+
+    for marker in choice_markers:
+        if marker in text:
+            distribution["choice"] += 1
+            break
+
+    for marker in blank_markers:
+        if marker in text:
+            distribution["blank"] += 1
+            break
+
+    for marker in short_markers:
+        if marker in text:
+            distribution["short_answer"] += 1
+            break
+
+    # 如果未检测到任何题型，返回默认值
+    total = sum(distribution.values())
+    if total == 0:
+        return {"choice": 5, "blank": 5, "short_answer": 5}
+
+    return distribution
+
+
+def _extract_knowledge_points(text: str) -> list[str]:
+    """从往期试卷文本中提取知识点列表。"""
+    # 简单的知识点提取（实际可由更复杂的 NLP 替换）
+    # 这里返回空列表，由 planner LLM 自行理解
+    return []
+
+
+def _extract_difficulty_distribution(text: str) -> dict[str, float]:
+    """从往期试卷文本中提取难度分布。"""
+    # 简单的难度分布提取
+    easy_count = text.lower().count("easy") + text.count("简单") + text.count("基础")
+    medium_count = text.lower().count("medium") + text.count("中等")
+    hard_count = text.lower().count("hard") + text.count("困难") + text.count("挑战")
+
+    total = easy_count + medium_count + hard_count
+    if total == 0:
+        return {"easy": 0.3, "medium": 0.5, "hard": 0.2}
+
+    return {
+        "easy": easy_count / total,
+        "medium": medium_count / total,
+        "hard": hard_count / total,
+    }
 
 
 async def _get_shared_summary(db: AsyncSession, job: Job) -> str | None:

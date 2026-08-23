@@ -58,23 +58,27 @@ async def run_fanout(
     tasks: list[tuple[str, Any]] = []
 
     if choice_plans:
+        # 为选择题检索知识库内容（修复 knowledge_context 为空问题）
+        choice_knowledge = await _retrieve_knowledge_for_batch(db, job_id, choice_plans)
         tasks.append(("choice", _run_with_limit(
             semaphore,
             generate_choice_all(
                 db=db, job_id=job_id, plan_items=choice_plans,
                 need_explanation=need_explanation, model=writer_model,
-                knowledge_context=knowledge_context, bus=bus,
+                knowledge_context=choice_knowledge, bus=bus,
                 retry_count_map=retry_count_map,
             ),
         )))
 
     if blank_plans:
+        # 为填空题检索知识库内容（修复 knowledge_context 为空问题）
+        blank_knowledge = await _retrieve_knowledge_for_batch(db, job_id, blank_plans)
         tasks.append(("blank", _run_with_limit(
             semaphore,
             generate_blank_all(
                 db=db, job_id=job_id, plan_items=blank_plans,
                 need_explanation=need_explanation, model=writer_model,
-                knowledge_context=knowledge_context, bus=bus,
+                knowledge_context=blank_knowledge, bus=bus,
                 retry_count_map=retry_count_map,
             ),
         )))
@@ -155,3 +159,21 @@ async def _retrieve_knowledge_for_plan(
             continue
 
     return "\n\n".join(chunks)
+
+
+async def _retrieve_knowledge_for_batch(
+    db: Any, job_id: uuid.UUID, plan_items: list[PlanItem]
+) -> str:
+    """为一批 plan_items 检索知识库内容（取并集）。"""
+    all_chunks: list[str] = []
+    seen_texts: set[str] = set()
+
+    for plan in plan_items:
+        chunks = await _retrieve_knowledge_for_plan(db, job_id, plan)
+        for chunk_text in chunks.split("\n\n"):
+            chunk_text = chunk_text.strip()
+            if chunk_text and chunk_text not in seen_texts:
+                seen_texts.add(chunk_text)
+                all_chunks.append(chunk_text)
+
+    return "\n\n".join(all_chunks[:20])  # 限制长度，避免上下文过长
