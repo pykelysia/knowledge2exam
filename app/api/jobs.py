@@ -29,7 +29,7 @@ from app.models.question import Question
 from app.models.upload import Upload
 from app.models.user import AppUser
 from app.orchestration.events import EventBus, subscribe, unsubscribe
-from app.orchestration.stages import run_mock_pipeline
+from app.orchestration.stages import run_pipeline
 from app.orchestration.state_machine import JobStatus, Stage, is_terminal
 from app.schemas.job import (
     Artifacts,
@@ -137,8 +137,8 @@ async def create_job(
     await db.commit()
     await db.refresh(job)
 
-    # 异步模拟 pipeline
-    background_tasks.add_task(run_mock_pipeline, job.id)
+    # 异步执行 pipeline（真实或模拟）
+    background_tasks.add_task(run_pipeline, job.id)
 
     return JobAccepted(job_id=job.id, status=JobStatus.pending, created_at=job.created_at)
 

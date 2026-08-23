@@ -40,6 +40,15 @@ class Settings(BaseSettings):
     # 模拟 pipeline 的步进间隔（秒），用于本地演示 SSE 进度
     mock_stage_delay_seconds: float = 0.5
 
+    # LLM（OpenAI 兼容协议）
+    llm_api_key: str = ""
+    llm_base_url: str = "http://localhost:8000/v1"
+    planner_model: str = "gpt-4o"
+    writer_model: str = "gpt-4o-mini"
+    reviewer_model: str = "gpt-4o"
+    compressor_model: str = "gpt-4o-mini"
+    max_concurrent_writers: int = 4
+
 
 @lru_cache
 def get_settings() -> Settings:
