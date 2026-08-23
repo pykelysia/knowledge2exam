@@ -21,7 +21,7 @@ dependencies = [
     "langgraph>=0.2.60",
     "openai>=1.50.0",
     "httpx>=0.28",
-    "pymupdf>=4.0",
+    "pymupdf",
     "python-docx>=1.1",
     "python-pptx>=0.6",
     "Pillow>=10.0",
