@@ -18,6 +18,9 @@ dependencies = [
     "PyJWT>=2.10",
     "bcrypt>=4.2",
     "sse-starlette>=2.1",
+    "langgraph>=0.2.60",
+    "openai>=1.50.0",
+    "httpx>=0.28",
 ]
 
 [dependency-groups]
