@@ -18,7 +18,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from app.orchestration.events import EventBus
 from app.orchestration.state_machine import JobStatus, Stage
 from app.rendering.markdown import build_markdown
-from app.rendering.renderer import StubRenderer
+from app.rendering.renderer import _get_renderer
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +187,7 @@ def make_rendering_node(db_factory, bus_factory):
             md_key = f"jobs/{job_id}/output/paper.md"
             await storage.put(md_key, md_text.encode("utf-8"))
 
-            renderer = StubRenderer()
+            renderer = _get_renderer()
             result = await renderer.render(
                 f"试卷（{state.get('duration_minutes', 100)} 分钟）",
                 [

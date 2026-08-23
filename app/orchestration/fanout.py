@@ -44,6 +44,7 @@ async def run_fanout(
     writer_model: str,
     knowledge_context: str,
     max_concurrent: int = 4,
+    retry_count_map: dict[uuid.UUID, int] | None = None,
 ) -> FanoutResult:
     """执行 fan-out 出题。"""
 
@@ -63,6 +64,7 @@ async def run_fanout(
                 db=db, job_id=job_id, plan_items=choice_plans,
                 need_explanation=need_explanation, model=writer_model,
                 knowledge_context=knowledge_context, bus=bus,
+                retry_count_map=retry_count_map,
             ),
         )))
 
@@ -73,6 +75,7 @@ async def run_fanout(
                 db=db, job_id=job_id, plan_items=blank_plans,
                 need_explanation=need_explanation, model=writer_model,
                 knowledge_context=knowledge_context, bus=bus,
+                retry_count_map=retry_count_map,
             ),
         )))
 
@@ -85,6 +88,7 @@ async def run_fanout(
                 db=db, job_id=job_id, plan_item=plan,
                 need_explanation=need_explanation, model=writer_model,
                 knowledge_context=plan_knowledge, bus=bus,
+                retry_count_map=retry_count_map,
             ),
         )))
 
