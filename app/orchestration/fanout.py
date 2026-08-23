@@ -7,14 +7,19 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from sqlalchemy import select
+
 from app.agents.question_writers import (
     generate_blank_all,
     generate_choice_all,
     generate_short_single,
 )
+from app.core.db import AsyncSessionLocal
+from app.models.job import Job
 from app.models.plan import PlanItem
 from app.orchestration.events import EventBus
-from app.orchestration.state_machine import Stage
+from app.retrieval.filters import FilterBuilder
+from app.retrieval.vector_store import PgVectorStore
 
 
 @dataclass
@@ -72,18 +77,20 @@ async def run_fanout(
         )))
 
     for plan in short_plans:
+        # 为简答题检索相关知识
+        plan_knowledge = await _retrieve_knowledge_for_plan(db, job_id, plan)
         tasks.append(("short", _run_with_limit(
             semaphore,
             generate_short_single(
                 db=db, job_id=job_id, plan_item=plan,
                 need_explanation=need_explanation, model=writer_model,
-                knowledge_context=knowledge_context, bus=bus,
+                knowledge_context=plan_knowledge, bus=bus,
             ),
         )))
 
     task_outputs = await asyncio.gather(*[t[1] for t in tasks], return_exceptions=True)
 
-    for (task_type, _), output in zip(tasks, task_outputs):
+    for (task_type, _), output in zip(tasks, task_outputs, strict=True):
         if isinstance(output, Exception):
             result.errors.append({"type": task_type, "error": str(output)})
             continue
@@ -95,3 +102,52 @@ async def run_fanout(
             result.short_questions.append(output)
 
     return result
+
+
+async def _retrieve_knowledge_for_plan(
+    db: Any, job_id: uuid.UUID, plan: PlanItem
+) -> str:
+    """为单个 plan_item 检索相关知识库内容。"""
+
+    job = await db.get(Job, job_id)
+    if not job or not job.school_id or not job.course_id:
+        return ""
+
+    # 获取该任务的所有 upload_ids
+
+    from app.models.job import JobUpload
+    upload_ids = (
+        await db.scalars(
+            select(JobUpload.upload_id).where(JobUpload.job_id == job_id)
+        )
+    ).all()
+
+    if not upload_ids:
+        return ""
+
+    vector_store = PgVectorStore(AsyncSessionLocal)
+
+    # 检索叠加类内容（book / lecture / note）
+    additive_types = ["book", "lecture", "note"]
+    chunks: list[str] = []
+
+    for source_type in additive_types:
+        filter_expr = FilterBuilder.additive(
+            user_id=job.user_id,
+            school_id=job.school_id,
+            course_id=job.course_id,
+            source_type=source_type,
+            upload_ids=list(upload_ids),
+        )
+        try:
+            result = await vector_store.search(
+                query=plan.exam_direction,
+                filter_expr=filter_expr,
+                top_k=3,
+            )
+            for c in result.chunks:
+                chunks.append(c["text"])
+        except Exception:
+            continue
+
+    return "\n\n".join(chunks)
