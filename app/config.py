@@ -19,8 +19,8 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # 数据库
-    database_url: str = "postgresql+asyncpg://k2e:k2e@localhost:5433/knowledge2exam"
+    # 数据库（默认值仅本地演示，生产环境请通过环境变量覆盖）
+    database_url: str = "postgresql+asyncpg://localhost/knowledge2exam"
 
     # 双 JWT
     jwt_secret: str = "dev-only-change-me-in-production"
@@ -48,6 +48,22 @@ class Settings(BaseSettings):
     reviewer_model: str = "gpt-4o"
     compressor_model: str = "gpt-4o-mini"
     max_concurrent_writers: int = 4
+
+    # 嵌入模型（OpenAI 兼容 embeddings 协议）
+    embedding_api_key: str = ""
+    embedding_base_url: str = "http://localhost:8000/v1"
+    embedding_model: str = "text-embedding-3-small"
+    embedding_dimensions: int = 1536
+
+    # 切块参数
+    chunk_size: int = 700
+    chunk_overlap: int = 100
+
+    # OCR（视觉 LLM，复用 LLM 配置或独立配置）
+    ocr_model: str = "gpt-4o"
+
+    # 旧格式转换工具路径（可选）
+    libreoffice_path: str = "libreoffice"
 
 
 @lru_cache
