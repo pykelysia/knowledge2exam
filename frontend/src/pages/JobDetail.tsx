@@ -7,8 +7,8 @@ import { JOB_STATUS_META, errorMessage } from '@/lib/constants'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { Spinner } from '@/components/ui/spinner'
-import type { Job, JobEventData, JobEventType, Question } from '@/api/types'
+import { Skeleton } from '@/components/ui/skeleton'
+import type { Job, JobEventData, JobEventType, Question, ReviewResultData } from '@/api/types'
 
 const STAGE_LABEL: Record<string, string> = {
   preprocessing: '预处理',
@@ -24,6 +24,7 @@ export function JobDetail() {
   const [questions, setQuestions] = useState<Question[]>([])
   const [error, setError] = useState<string | null>(null)
   const [logs, setLogs] = useState<string[]>([])
+  const [reviewResult, setReviewResult] = useState<ReviewResultData | null>(null)
 
   // 轮询降级 + 初始快照。
   useEffect(() => {
@@ -85,6 +86,7 @@ export function JobDetail() {
         case 'review_result': {
           const d = data as Extract<JobEventData, { checked: number; passed: number }>
           setLogs((prev) => [...prev, `审查完成：${d.passed}/${d.checked} 通过`])
+          setReviewResult(d as ReviewResultData)
           break
         }
         case 'warning': {
@@ -128,8 +130,27 @@ export function JobDetail() {
 
   if (!job) {
     return (
-      <div className="flex items-center justify-center py-24">
-        <Spinner className="h-8 w-8" />
+      <div className="space-y-6">
+        <div className="flex items-center justify-between">
+          <div>
+            <Skeleton className="h-8 w-32" />
+            <Skeleton className="mt-2 h-4 w-48" />
+          </div>
+          <Skeleton className="h-8 w-20" />
+        </div>
+        <Card>
+          <CardContent className="pt-5">
+            <Skeleton className="h-2 w-full" />
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
+            <Skeleton className="h-6 w-24" />
+          </CardHeader>
+          <CardContent>
+            <Skeleton className="h-20 w-full" />
+          </CardContent>
+        </Card>
       </div>
     )
   }
@@ -241,40 +262,113 @@ export function JobDetail() {
         </CardContent>
       </Card>
 
+      {/* 审查结果 */}
+      {reviewResult && (
+        <Card>
+          <CardHeader>
+            <CardTitle>审查结果</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="flex items-center gap-4 text-sm">
+              <span className="text-slate-600">
+                共审查 <span className="font-medium">{reviewResult.checked}</span> 题，
+                通过 <span className="font-medium text-emerald-600">{reviewResult.passed}</span> 题
+              </span>
+            </div>
+            {(reviewResult.rejected?.length ?? 0) > 0 && (
+              <div>
+                <p className="text-sm font-medium text-red-700">被拒绝：</p>
+                <ul className="mt-1 list-inside list-disc text-sm text-red-600">
+                  {reviewResult.rejected.map((r, i) => (
+                    <li key={i}>第 {r.seq} 题 — {r.reason}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {(reviewResult.auto_fixed?.length ?? 0) > 0 && (
+              <div>
+                <p className="text-sm font-medium text-amber-700">自动修复：</p>
+                <ul className="mt-1 list-inside list-disc text-sm text-amber-600">
+                  {reviewResult.auto_fixed.map((r, i) => (
+                    <li key={i}>第 {r.seq} 题 — {r.reason}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
       {/* 已产出题目 */}
-      {questions.length > 0 && (
+      {(job.status === 'generating' || job.status === 'reviewing' || job.status === 'rendering' || job.status === 'completed' || job.status === 'partially_completed') && (
         <Card>
           <CardHeader>
             <CardTitle>已产出的题目（{questions.length}）</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            {questions.map((q) => (
-              <div key={q.seq} className="rounded-md border border-slate-200 p-4">
-                <div className="mb-2 flex items-center gap-2">
-                  <Badge>{q.seq}</Badge>
-                  <Badge>
-                    {q.question_type === 'choice'
-                      ? '选择题'
-                      : q.question_type === 'blank'
-                        ? '填空题'
-                        : '简答题'}
-                  </Badge>
-                </div>
-                <p className="text-sm text-slate-800">{q.stem}</p>
-                {q.options && (
-                  <ul className="mt-2 space-y-1 text-sm text-slate-600">
-                    {Object.entries(q.options).map(([k, v]) => (
-                      <li key={k}>
-                        {k}. {v}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                {q.explanation && (
-                  <p className="mt-2 text-sm text-slate-500">解析：{q.explanation}</p>
-                )}
+            {questions.length === 0 ? (
+              <div className="space-y-3">
+                {Array.from({ length: 3 }).map((_, i) => (
+                  <div key={i} className="space-y-2">
+                    <div className="flex items-center gap-2">
+                      <Skeleton className="h-5 w-8" />
+                      <Skeleton className="h-5 w-12" />
+                    </div>
+                    <Skeleton className="h-4 w-full" />
+                    <Skeleton className="h-4 w-2/3" />
+                  </div>
+                ))}
               </div>
-            ))}
+            ) : (
+              questions.map((q) => (
+                <div key={q.seq} className="rounded-md border border-slate-200 p-4">
+                  <div className="mb-2 flex items-center gap-2">
+                    <Badge>{q.seq}</Badge>
+                    <Badge>
+                      {q.question_type === 'choice'
+                        ? '选择题'
+                        : q.question_type === 'blank'
+                          ? '填空题'
+                          : '简答题'}
+                    </Badge>
+                  </div>
+                  <p className="text-sm text-slate-800">{q.stem}</p>
+                  {q.options && (
+                    <ul className="mt-2 space-y-1 text-sm text-slate-600">
+                      {Object.entries(q.options).map(([k, v]) => (
+                        <li key={k}>
+                          {k}. {v}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {q.answer && (
+                    <div className="mt-2 rounded-md bg-slate-50 p-2 text-sm text-slate-700">
+                      <span className="font-medium">答案：</span>
+                      {q.answer}
+                    </div>
+                  )}
+                  {q.explanation && (
+                    <p className="mt-2 text-sm text-slate-500">解析：{q.explanation}</p>
+                  )}
+                  {q.sub_questions && q.sub_questions.length > 0 && (
+                    <div className="mt-2 space-y-1">
+                      {q.sub_questions.map((sq, i) => (
+                        <div key={i} className="text-sm text-slate-600">
+                          <span className="font-medium">小题 {i + 1}：</span>
+                          {sq}
+                          {q.sub_answers?.[i] && (
+                            <span className="ml-2 text-slate-500">
+                              答案：{q.sub_answers[i]}
+                            </span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))
+            )}
           </CardContent>
         </Card>
       )}
