@@ -364,13 +364,37 @@ async def run_planner(
         f"请尽量遵循此分布，若有充分理由可微调，但总耗时必须落在上述区间内。"
     )
 
+    # 换题模式：在 prompt 中追加换题请求信息
+    replacement_hint = ""
+    if context.get("mode") == "replacement" and context.get("replacement_requests"):
+        replacement_hint = "\n\n【换题请求】\n"
+        for req in context["replacement_requests"]:
+            replacement_hint += (
+                f"- 第 {req['seq']} 题：{req['question_type']}，"
+                f"知识点「{req['knowledge_point']}」，考察方向「{req['exam_direction']}」\n"
+                f"  失败原因：{req['failure_reason']}，已重试 {req['retry_count']} 次\n"
+            )
+        replacement_hint += "\n当前试卷已包含的题目（请避免重复）：\n"
+        for item in context.get("current_plan_items", []):
+            replacement_hint += (
+                f"- 第 {item['seq']} 题：{item['question_type']}，"
+                f"知识点「{item['knowledge_point']}」，考察方向「{item['exam_direction']}」\n"
+            )
+        replacement_hint += (
+            "\n要求：\n"
+            "1. 为每个换题请求生成新的 plan_item，保持相同的 seq 和 question_type\n"
+            "2. 建议更换知识点或考察方向，避免与当前试卷中的题目重复\n"
+            "3. 保持总题数和题型分布不变\n"
+            "4. 输出仅包含需要更换的 plan_item 列表\n"
+        )
+
     prompt = template.format(
         duration_minutes=duration_minutes,
         past_papers_full_text_or_none=past_papers_full_text,
         keypoint_list_or_none=keypoint_list,
         extra_requirement_or_none=extra_requirement,
         shared_library_summary=shared_library_summary,
-    ) + distribution_hint
+    ) + distribution_hint + replacement_hint
 
     # 5. 调用 LLM
     max_retries = 3

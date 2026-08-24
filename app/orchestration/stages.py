@@ -162,6 +162,7 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
             reviewer_model=getattr(settings, "reviewer_model", "gpt-4o"),
             writer_model=getattr(settings, "writer_model", "gpt-4o-mini"),
             max_concurrent=getattr(settings, "max_concurrent_writers", 4),
+            context=context,
         )
 
     # ---------- rendering ----------
@@ -265,6 +266,7 @@ async def _run_review_with_retry(
     reviewer_model: str,
     writer_model: str,
     max_concurrent: int,
+    context: dict[str, Any] | None = None,
 ) -> None:
     """执行 reviewer，对打回的题目进入重试/换题循环。"""
 
@@ -312,6 +314,7 @@ async def _run_review_with_retry(
                 to_abandon.append(q)
 
         # 处理废弃题目：标记 + emit question_replanned
+        replacement_requests: list[dict[str, Any]] = []
         for q in to_abandon:
             q.status = "abandoned"
             _write_retry_log(
@@ -328,23 +331,64 @@ async def _run_review_with_retry(
                     "retry_count": q.retry_count,
                 },
             )
-            # 由主 planner 生成新 plan_item；此处仅 emit 事件，
-            # 真正的换题生成在下一轮 fanout 中通过新增 plan_item 完成。
-            # 为保证试卷完整性，此处直接复制原 plan_item 并生成新题：
+
+            # 收集换题请求信息
             old_plan = plan_map.get(q.seq)
             if old_plan:
-                new_plan = PlanItem(
+                replacement_requests.append({
+                    "seq": q.seq,
+                    "question_type": q.question_type,
+                    "knowledge_point": old_plan.knowledge_point,
+                    "exam_direction": old_plan.exam_direction,
+                    "difficulty": old_plan.difficulty,
+                    "failure_reason": "retry_exhausted",
+                    "retry_count": q.retry_count,
+                })
+
+        # 如果有换题请求，调用 planner 生成替换方案
+        new_plan_items: list[PlanItem] = []
+        if replacement_requests and context:
+            try:
+                # 构建当前试卷的 plan_items 列表（仅包含未被 superseded 的）
+                current_plans = [p for p in plan_items if p.superseded_by is None]
+                new_plan_items = await run_planner(
+                    db=db,
                     job_id=job.id,
-                    seq=old_plan.seq,
-                    question_type=old_plan.question_type,
-                    knowledge_point=old_plan.knowledge_point,
-                    exam_direction=old_plan.exam_direction,
-                    difficulty=old_plan.difficulty,
-                    reference_source=old_plan.reference_source,
+                    bus=bus,
+                    context={
+                        "duration_minutes": job.duration_minutes,
+                        "past_papers_full_text_or_none": context.get("past_papers_full_text_or_none"),
+                        "keypoint_list_or_none": context.get("keypoint_list_or_none"),
+                        "extra_requirement_or_none": context.get("extra_requirement_or_none"),
+                        "shared_library_summary": context.get("shared_library_summary"),
+                        "planner_model": getattr(settings, "planner_model", "gpt-4o"),
+                        "reference_used": "shared_library",
+                        "mode": "replacement",
+                        "replacement_requests": replacement_requests,
+                        "current_plan_items": [
+                            {
+                                "seq": p.seq,
+                                "question_type": p.question_type,
+                                "knowledge_point": p.knowledge_point,
+                                "exam_direction": p.exam_direction,
+                            }
+                            for p in current_plans
+                        ],
+                    },
                 )
+            except Exception as exc:
+                logging.getLogger(__name__).error(
+                    "Planner 换题调用失败，回退到直接复制逻辑: %s", exc, exc_info=True
+                )
+                new_plan_items = []
+
+        # 为换题题目创建新 plan_item 并生成题目
+        for new_plan in new_plan_items:
+            old_plan = plan_map.get(new_plan.seq)
+            if old_plan:
+                old_plan.superseded_by = new_plan.id
                 db.add(new_plan)
                 await db.flush()
-                old_plan.superseded_by = new_plan.id
 
                 # 为新 plan_item 生成题目（retry_count 重置为 0）
                 try:
@@ -374,6 +418,54 @@ async def _run_review_with_retry(
                         {"error": str(exc), "model": writer_model},
                     )
                     await db.commit()
+
+        # 对于 planner 未覆盖的废弃题目，回退到直接复制逻辑
+        covered_seqs = {p.seq for p in new_plan_items}
+        for q in to_abandon:
+            if q.seq not in covered_seqs:
+                old_plan = plan_map.get(q.seq)
+                if old_plan:
+                    # 直接复制旧 plan_item 并生成新题
+                    fallback_plan = PlanItem(
+                        job_id=job.id,
+                        seq=old_plan.seq,
+                        question_type=old_plan.question_type,
+                        knowledge_point=old_plan.knowledge_point,
+                        exam_direction=old_plan.exam_direction,
+                        difficulty=old_plan.difficulty,
+                        reference_source=old_plan.reference_source,
+                    )
+                    db.add(fallback_plan)
+                    await db.flush()
+                    old_plan.superseded_by = fallback_plan.id
+
+                    try:
+                        knowledge_context = await _retrieve_knowledge_for_plan(db, job.id, fallback_plan)
+                        new_q = await generate_single_question(
+                            db=db,
+                            job_id=job.id,
+                            plan_item=fallback_plan,
+                            need_explanation=need_explanation,
+                            model=writer_model,
+                            knowledge_context=knowledge_context,
+                            retry_count=0,
+                        )
+                        new_q.replanned_from = old_plan.id
+                        if bus:
+                            await bus.emit(
+                                job.id, "question_completed",
+                                {"seq": new_q.seq, "question_type": new_q.question_type,
+                                 "completed": 1, "total": 1},
+                                stage=None,
+                            )
+                            await db.commit()
+                    except Exception as exc:
+                        _write_retry_log(
+                            db, None, fallback_plan.id, 0,
+                            "generation_failed", False,
+                            {"error": str(exc), "model": writer_model},
+                        )
+                        await db.commit()
 
         if not to_retry:
             # 所有打回题目均已废弃，无更多重试
