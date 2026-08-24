@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     chunk_size: int = 700
     chunk_overlap: int = 100
 
+    # 用户文本输入长度限制（字符数），超过则触发压缩
+    max_keypoint_list_chars: int = 3000
+    max_extra_requirement_chars: int = 2000
+
     # OCR（视觉 LLM，复用 LLM 配置或独立配置）
     ocr_model: str = "gpt-4o"
 
