@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import uuid
 from collections import Counter
@@ -11,11 +12,15 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.compressor import compress_text
 from app.agents.llm import llm_client
 from app.agents.prompts import load_prompt
+from app.config import settings
 from app.models.plan import PlanItem
 from app.orchestration.events import EventBus
 from app.orchestration.state_machine import Stage
+
+logger = logging.getLogger(__name__)
 
 
 # 单位耗时基准（分钟/题）
@@ -328,6 +333,41 @@ async def run_planner(
     keypoint_list = context.get("keypoint_list_or_none") or "无"
     extra_requirement = context.get("extra_requirement_or_none") or "无"
     shared_library_summary = context.get("shared_library_summary") or "无共享库内容"
+
+    # 1.1 对关键点和额外要求做长度检查与压缩
+    compressor_model = getattr(settings, "compressor_model", "gpt-4o-mini")
+
+    if len(keypoint_list) > settings.max_keypoint_list_chars:
+        logger.info(
+            "keypoint_list 超长（%d 字符，阈值 %d），触发压缩",
+            len(keypoint_list),
+            settings.max_keypoint_list_chars,
+        )
+        try:
+            keypoint_list = await compress_text(
+                raw_text=keypoint_list,
+                target_tokens=max(settings.max_keypoint_list_chars // 4, 500),
+                model=compressor_model,
+            )
+        except Exception as exc:
+            logger.warning("压缩 keypoint_list 失败，回退到硬截断: %s", exc)
+            keypoint_list = keypoint_list[: settings.max_keypoint_list_chars]
+
+    if len(extra_requirement) > settings.max_extra_requirement_chars:
+        logger.info(
+            "extra_requirement 超长（%d 字符，阈值 %d），触发压缩",
+            len(extra_requirement),
+            settings.max_extra_requirement_chars,
+        )
+        try:
+            extra_requirement = await compress_text(
+                raw_text=extra_requirement,
+                target_tokens=max(settings.max_extra_requirement_chars // 4, 500),
+                model=compressor_model,
+            )
+        except Exception as exc:
+            logger.warning("压缩 extra_requirement 失败，回退到硬截断: %s", exc)
+            extra_requirement = extra_requirement[: settings.max_extra_requirement_chars]
 
     # 2. 推导题型占比
     question_types = ["choice", "blank", "short_answer"]
