@@ -7,12 +7,13 @@ import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Spinner } from '@/components/ui/spinner'
+import { Skeleton } from '@/components/ui/skeleton'
 import { uploadFile, uploadText, deleteUpload } from '@/api/uploads'
 import { createJob } from '@/api/jobs'
 import { listCourses, listSchools } from '@/api/schools'
 import { extractApiError } from '@/api/client'
 import { FILE_SOURCE_TYPES, SOURCE_TYPE_META, errorMessage, isAllowedExtension } from '@/lib/constants'
-import type { Course, School, SourceType, SourceTypeFile, SourceTypeText } from '@/api/types'
+import type { Course, School, SourceType, SourceTypeFile, SourceTypeText, Upload } from '@/api/types'
 
 /** 前端维护的输入项：一个文件（含其 source_type 与共享意愿）或一段文本。 */
 interface InputItem {
@@ -26,6 +27,10 @@ interface InputItem {
   uploadId?: string
   uploading?: boolean
   error?: string
+  // 上传返回的解析预览与状态。
+  parseStatus?: Upload['parse_status']
+  parseError?: string | null
+  preview?: Upload['preview']
 }
 
 let seq = 0
@@ -49,6 +54,8 @@ export function Dashboard() {
   const [courses, setCourses] = useState<Course[]>([])
   const [schoolId, setSchoolId] = useState('')
   const [courseId, setCourseId] = useState('')
+  const [loadingSchools, setLoadingSchools] = useState(true)
+  const [loadingCourses, setLoadingCourses] = useState(false)
 
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -60,6 +67,7 @@ export function Dashboard() {
     listSchools()
       .then((res) => setSchools(res.schools))
       .catch(() => setSchools([]))
+      .finally(() => setLoadingSchools(false))
   }, [])
 
   useEffect(() => {
@@ -67,9 +75,11 @@ export function Dashboard() {
       setCourses([])
       return
     }
+    setLoadingCourses(true)
     listCourses(schoolId)
       .then((res) => setCourses(res.courses))
       .catch(() => setCourses([]))
+      .finally(() => setLoadingCourses(false))
   }, [schoolId])
 
   function addFiles(files: FileList | File[]) {
@@ -149,17 +159,30 @@ export function Dashboard() {
           if (item.kind === 'file' && item.file) {
             const res = await uploadFile(item.file, item.sourceType as SourceTypeFile, item.shareable)
             uploadId = res.upload_id
+            updateItem(item.id, {
+              uploading: false,
+              uploadId,
+              parseStatus: res.parse_status,
+              parseError: res.parse_error,
+              preview: res.preview,
+            })
           } else if (item.kind === 'text' && item.rawText) {
             const res = await uploadText({
               source_type: item.sourceType as SourceTypeText,
               raw_text: item.rawText,
             })
             uploadId = res.upload_id
+            updateItem(item.id, {
+              uploading: false,
+              uploadId,
+              parseStatus: res.parse_status,
+              parseError: res.parse_error,
+              preview: res.preview,
+            })
           } else {
             continue
           }
           uploadIds.push(uploadId)
-          updateItem(item.id, { uploading: false, uploadId })
         } catch (err) {
           const apiErr = extractApiError(err)
           updateItem(item.id, {
@@ -198,6 +221,23 @@ export function Dashboard() {
         enable_review: enableReview,
       })
 
+      // 记录到本地历史，供任务列表页使用。
+      try {
+        const key = 'k2e.job_history'
+        const history: Array<{ job_id: string; created_at: string }> = (() => {
+          try {
+            const raw = localStorage.getItem(key)
+            return raw ? JSON.parse(raw) : []
+          } catch {
+            return []
+          }
+        })()
+        history.unshift({ job_id: job.job_id, created_at: new Date().toISOString() })
+        localStorage.setItem(key, JSON.stringify(history.slice(0, 100)))
+      } catch {
+        // 忽略存储失败。
+      }
+
       navigate(`/jobs/${job.job_id}`)
     } catch (err) {
       const apiErr = extractApiError(err)
@@ -223,6 +263,41 @@ export function Dashboard() {
     ),
     [],
   )
+
+  function renderPreview(item: InputItem) {
+    if (!item.uploadId) return null
+    const status = item.parseStatus
+    if (status === 'failed') {
+      return (
+        <div className="mt-1 text-xs text-red-600">
+          {item.parseError || '解析失败'}
+        </div>
+      )
+    }
+    if (status === 'succeeded' && item.preview) {
+      return (
+        <div className="mt-1 space-y-1">
+          {item.preview.excerpt && (
+            <p className="text-xs text-slate-500 line-clamp-2">
+              {item.preview.excerpt}
+            </p>
+          )}
+          <div className="flex gap-3 text-xs text-slate-400">
+            {typeof item.preview.char_count === 'number' && (
+              <span>{item.preview.char_count} 字</span>
+            )}
+            {typeof item.preview.page_count === 'number' && (
+              <span>{item.preview.page_count} 页</span>
+            )}
+          </div>
+        </div>
+      )
+    }
+    if (item.uploading) {
+      return <div className="mt-1 text-xs text-slate-400">正在解析…</div>
+    }
+    return null
+  }
 
   return (
     <div className="space-y-6">
@@ -265,31 +340,34 @@ export function Dashboard() {
                   .map((it) => (
                     <li
                       key={it.id}
-                      className="flex items-center gap-3 rounded-md border border-slate-200 px-3 py-2"
+                      className="flex flex-col rounded-md border border-slate-200 px-3 py-2"
                     >
-                      <FileText className="h-4 w-4 shrink-0 text-slate-400" />
-                      <span className="min-w-0 flex-1 truncate text-sm text-slate-700">
-                        {it.file?.name}
-                      </span>
-                      {renderSourceTypeSelect(it)}
-                      <label className="flex items-center gap-1 text-xs text-slate-600">
-                        <input
-                          type="checkbox"
-                          checked={it.shareable}
-                          onChange={(e) => updateItem(it.id, { shareable: e.target.checked })}
-                        />
-                        共享
-                      </label>
-                      {it.uploading && <Spinner className="h-4 w-4" />}
-                      {it.error && <span className="text-xs text-red-600">{it.error}</span>}
-                      <button
-                        type="button"
-                        onClick={() => removeItem(it.id)}
-                        className="text-slate-400 hover:text-red-600"
-                        aria-label="移除"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
+                      <div className="flex items-center gap-3">
+                        <FileText className="h-4 w-4 shrink-0 text-slate-400" />
+                        <span className="min-w-0 flex-1 truncate text-sm text-slate-700">
+                          {it.file?.name}
+                        </span>
+                        {renderSourceTypeSelect(it)}
+                        <label className="flex items-center gap-1 text-xs text-slate-600">
+                          <input
+                            type="checkbox"
+                            checked={it.shareable}
+                            onChange={(e) => updateItem(it.id, { shareable: e.target.checked })}
+                          />
+                          共享
+                        </label>
+                        {it.uploading && <Spinner className="h-4 w-4" />}
+                        {it.error && <span className="text-xs text-red-600">{it.error}</span>}
+                        <button
+                          type="button"
+                          onClick={() => removeItem(it.id)}
+                          className="text-slate-400 hover:text-red-600"
+                          aria-label="移除"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </div>
+                      {renderPreview(it)}
                     </li>
                   ))}
               </ul>
@@ -351,6 +429,7 @@ export function Dashboard() {
                     </option>
                   ))}
                 </select>
+                {loadingSchools && <Skeleton className="mt-1 h-4 w-full" />}
               </div>
               <div>
                 <Label htmlFor="course">课程</Label>
@@ -358,7 +437,7 @@ export function Dashboard() {
                   id="course"
                   value={courseId}
                   onChange={(e) => setCourseId(e.target.value)}
-                  disabled={!schoolId}
+                  disabled={!schoolId || loadingCourses}
                   className="w-full rounded-md border border-slate-300 bg-white px-2 py-2 text-sm disabled:opacity-50"
                 >
                   <option value="">请选择课程</option>
@@ -371,6 +450,7 @@ export function Dashboard() {
                     </option>
                   ))}
                 </select>
+                {loadingCourses && <Skeleton className="mt-1 h-4 w-full" />}
               </div>
             </CardContent>
           </Card>
