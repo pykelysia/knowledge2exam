@@ -25,6 +25,7 @@ from app.core.storage import storage
 from app.ingestion.chunking import Chunker
 from app.ingestion.embedding import EmbeddingClient
 from app.ingestion.parsers import get_parser
+from app.ingestion.postprocess import build_merged_text, process_images
 from app.models.job import Job, JobUpload
 from app.models.plan import PlanItem
 from app.models.question import Question, RetryLog
@@ -763,6 +764,15 @@ async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, An
         try:
             data = await storage.get(upload.storage_key)
             result = await parser.parse(upload.filename or "", data)
+
+            # 图片后处理：去重、合并、间隙标记
+            if result.images:
+                process_images(result.images)
+                image_text = build_merged_text(result.images)
+                if image_text:
+                    result.text = result.text + "\n\n" + image_text
+                    result.char_count = len(result.text)
+
             upload.parse_status = "succeeded"
         except Exception as exc:
             upload.parse_status = "failed"

@@ -20,7 +20,8 @@ from app.core.exceptions import (
     UploadNotFound,
 )
 from app.core.storage import storage
-from app.ingestion.parsers.base import SUPPORTED_EXTENSIONS, StubParser
+from app.ingestion.parsers import get_parser
+from app.ingestion.parsers.base import SUPPORTED_EXTENSIONS
 from app.models.job import JobUpload
 from app.models.resource import Resource
 from app.models.upload import Upload
@@ -90,8 +91,8 @@ async def _parse_and_store_file(
     db.add(upload)
     await db.flush()
 
-    # 解析（stub）
-    parser = StubParser()
+    # 解析
+    parser = get_parser(filename or "")
     try:
         result = await parser.parse(filename, data)
         upload.parse_status = "succeeded"
