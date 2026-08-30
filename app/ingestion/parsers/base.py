@@ -28,11 +28,23 @@ SUPPORTED_EXTENSIONS = {
 
 
 @dataclass
+class ImageInfo:
+    """文档内嵌图片信息。"""
+    page: int | None = None
+    data: bytes | None = None
+    bbox: tuple[float, float, float, float] | None = None
+    order: int = 0
+    ocr_text: str | None = None
+    skipped_reason: str | None = None
+
+
+@dataclass
 class ParseResult:
     char_count: int
     page_count: int | None
     excerpt: str
     text: str
+    images: list[ImageInfo] | None = None
 
 
 class Parser:

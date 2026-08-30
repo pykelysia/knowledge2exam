@@ -1,14 +1,14 @@
-"""DOCX 解析器：使用 python-docx 提取文本。"""
+"""DOCX 解析器：使用 python-docx 提取文本和内嵌图片。"""
 
 from __future__ import annotations
 
 import io
 
-from app.ingestion.parsers.base import Parser, ParseResult
+from app.ingestion.parsers.base import ImageInfo, Parser, ParseResult
 
 
 class DocxParser(Parser):
-    """DOCX 解析器，提取段落文本。"""
+    """DOCX 解析器，提取段落文本和内嵌图片。"""
 
     async def parse(self, filename: str, data: bytes) -> ParseResult:
         try:
@@ -32,6 +32,31 @@ class DocxParser(Parser):
                 if row_text:
                     parts.append(row_text)
 
+        # 提取内嵌图片（通过 document.part 的关系）
+        images: list[ImageInfo] = []
+        seen_rels: set[str] = set()
+        try:
+            for rel in doc.part.rels.values():
+                if "image" not in rel.reltype:
+                    continue
+                if rel.rId in seen_rels:
+                    continue
+                seen_rels.add(rel.rId)
+                try:
+                    image_part = rel.target_part
+                    image_bytes = image_part.blob
+                    images.append(
+                        ImageInfo(
+                            page=None,
+                            data=image_bytes,
+                            order=len(images),
+                        )
+                    )
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
         text = "\n\n".join(parts)
 
         return ParseResult(
@@ -39,4 +64,5 @@ class DocxParser(Parser):
             page_count=None,
             excerpt=text[:200],
             text=text,
+            images=images if images else None,
         )

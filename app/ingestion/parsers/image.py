@@ -5,7 +5,7 @@ from __future__ import annotations
 import io
 
 from app.ingestion.ocr import VisionLLMOCR
-from app.ingestion.parsers.base import Parser, ParseResult
+from app.ingestion.parsers.base import ImageInfo, Parser, ParseResult
 
 
 class ImageParser(Parser):
@@ -17,19 +17,28 @@ class ImageParser(Parser):
 
         # 2. 调用视觉 LLM 提取文本
         ocr = VisionLLMOCR.from_settings()
+        ocr_text = None
         try:
-            text = await ocr.extract_text(processed_data)
+            ocr_text = await ocr.extract_text(processed_data)
         except Exception as exc:
             raise RuntimeError(f"图片 OCR 失败: {exc}") from exc
 
-        if not text.strip():
-            text = f"（图片 {filename}，OCR 未识别出有效文本）"
+        if not ocr_text or not ocr_text.strip():
+            ocr_text = f"（图片 {filename}，OCR 未识别出有效文本）"
+
+        image_info = ImageInfo(
+            page=None,
+            data=data,
+            order=0,
+            ocr_text=ocr_text.strip(),
+        )
 
         return ParseResult(
-            char_count=len(text),
+            char_count=len(ocr_text.strip()),
             page_count=None,
-            excerpt=text[:200],
-            text=text,
+            excerpt=ocr_text.strip()[:200],
+            text=ocr_text.strip(),
+            images=[image_info],
         )
 
 
