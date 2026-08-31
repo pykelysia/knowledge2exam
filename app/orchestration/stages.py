@@ -78,16 +78,17 @@ async def run_pipeline(job_id: uuid.UUID) -> None:
         )
 
         if not has_llm:
-            await run_mock_pipeline(job_id)
-            return
+            raise RuntimeError(
+                "LLM 配置缺失（llm_api_key / llm_base_url），无法执行真实 pipeline。"
+            )
 
         try:
             await _run_real_pipeline(db, job, bus)
         except Exception as exc:
             logging.getLogger(__name__).error(
-                "真实 pipeline 失败，回退到模拟: %s", exc, exc_info=True
+                "真实 pipeline 失败: %s", exc, exc_info=True
             )
-            await run_mock_pipeline(job_id)
+            raise
 
 
 async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:

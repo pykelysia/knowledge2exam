@@ -126,11 +126,8 @@ class PandocXeLaTeXRenderer(Renderer):
         # 2. 检查依赖
         pandoc = shutil.which("pandoc")
         if not pandoc:
-            msg = "pandoc 未安装，无法渲染 PDF。请安装 pandoc 或设置 PDF_RAISE_ON_MISSING=0 以降级为 StubRenderer。"
-            if self.raise_on_missing:
-                raise RuntimeError(msg)
-            logger.warning(msg)
-            return await StubRenderer().render(title, questions)
+            msg = "pandoc 未安装，无法渲染 PDF。请安装 pandoc。"
+            raise RuntimeError(msg)
 
         # 3. 构建 pandoc 命令
         cmd: list[str] = [
@@ -173,27 +170,27 @@ class PandocXeLaTeXRenderer(Renderer):
                 timeout=self.timeout,
             )
         except asyncio.TimeoutError:
-            logger.error("PDF 渲染超时（%ds），降级为 StubRenderer", self.timeout)
-            return await StubRenderer().render(title, questions)
+            logger.error("PDF 渲染超时（%ds）", self.timeout)
+            raise
         except FileNotFoundError as exc:
-            logger.error("PDF 渲染依赖缺失: %s，降级为 StubRenderer", exc)
-            return await StubRenderer().render(title, questions)
+            logger.error("PDF 渲染依赖缺失: %s", exc)
+            raise
         except Exception as exc:
-            logger.error("PDF 渲染失败: %s，降级为 StubRenderer", exc)
-            return await StubRenderer().render(title, questions)
+            logger.error("PDF 渲染失败: %s", exc)
+            raise
 
         if proc.returncode != 0:
             err_text = stderr.decode("utf-8", errors="replace")[:500]
             logger.error(
-                "Pandoc 退出码 %d: %s，降级为 StubRenderer",
+                "Pandoc 退出码 %d: %s",
                 proc.returncode, err_text,
             )
-            return await StubRenderer().render(title, questions)
+            raise RuntimeError(f"Pandoc 渲染失败，退出码 {proc.returncode}: {err_text}")
 
         pdf_bytes = stdout
         if not pdf_bytes or not pdf_bytes.startswith(b"%PDF"):
-            logger.error("Pandoc 输出不是有效 PDF，降级为 StubRenderer")
-            return await StubRenderer().render(title, questions)
+            logger.error("Pandoc 输出不是有效 PDF")
+            raise RuntimeError("Pandoc 输出不是有效 PDF")
 
         return RenderResult(md=md_bytes, pdf=pdf_bytes)
 

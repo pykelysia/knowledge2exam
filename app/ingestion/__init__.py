@@ -6,13 +6,12 @@ from app.ingestion.chunking import Chunk, Chunker
 from app.ingestion.embedding import EmbeddingClient
 from app.ingestion.ocr import VisionLLMOCR
 from app.ingestion.parsers import get_parser
-from app.ingestion.parsers.base import SUPPORTED_EXTENSIONS, ImageInfo, Parser, ParseResult, StubParser
+from app.ingestion.parsers.base import SUPPORTED_EXTENSIONS, ImageInfo, Parser, ParseResult
 
 __all__ = [
     "ImageInfo",
     "Parser",
     "ParseResult",
-    "StubParser",
     "SUPPORTED_EXTENSIONS",
     "get_parser",
     "Chunk",

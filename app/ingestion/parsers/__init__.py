@@ -9,7 +9,6 @@ from app.ingestion.parsers.base import (
 )
 from app.ingestion.parsers.base import (
     Parser,
-    StubParser,
 )
 from app.ingestion.parsers.base import (
     ParseResult as ParseResult,
@@ -39,5 +38,5 @@ def get_parser(filename: str) -> Parser:
         elif ext in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}:
             _PARSERS[ext] = ImageParser()
         else:
-            return StubParser()
+            raise ValueError(f"Unsupported file format: {ext}")
     return _PARSERS[ext]
