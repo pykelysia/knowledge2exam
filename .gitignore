@@ -16,3 +16,5 @@ storage/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+logs/
+scripts/
