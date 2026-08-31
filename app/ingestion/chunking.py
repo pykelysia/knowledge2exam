@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
+from app.core.debug_log import log_step
 from app.core.enums import SourceType
 
 
@@ -44,15 +45,27 @@ class Chunker:
         source_type: SourceType | None = None,
     ) -> list[Chunk]:
         """将文本切分为多个 chunk。"""
+        chunks = []
         if source_type == SourceType.lecture and page is not None:
             # PPTX：每页一 chunk，超长再切
-            return self._chunk_by_page(text, page, source_type)
+            chunks = self._chunk_by_page(text, page, source_type)
         elif source_type == SourceType.book:
             # PDF：按语义段落，跨页合并
-            return self._chunk_by_paragraph(text, page, source_type)
+            chunks = self._chunk_by_paragraph(text, page, source_type)
         else:
             # DOCX / 其他：按大小切
-            return self._chunk_by_size(text, page, source_type)
+            chunks = self._chunk_by_size(text, page, source_type)
+
+        if chunks:
+            log_step(
+                job_id="",
+                name="chunker.chunk",
+                stage="preprocessing",
+                input={"text_chars": len(text), "source_type": source_type.value if source_type else None},
+                output={"chunk_count": len(chunks)},
+            )
+
+        return chunks
 
     def _chunk_by_page(
         self,
