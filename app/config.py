@@ -69,6 +69,9 @@ class Settings(BaseSettings):
     # 旧格式转换工具路径（可选）
     libreoffice_path: str = "libreoffice"
 
+    # Debug 模式（仅开发环境使用）
+    debug_mode: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:
