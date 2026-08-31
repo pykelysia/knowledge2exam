@@ -17,6 +17,7 @@ from app.agents.tools import (
     validate_tool_call,
     tool_name_to_question_type,
 )
+from app.core.debug_log import log_step
 from app.core.exceptions import AppException, ErrorCode
 from app.models.question import Question, RetryLog
 
@@ -36,10 +37,12 @@ async def _call_writer_llm(
     temperature: float = 0.7,
 ) -> dict:
     """调用 LLM 生成单道题目，返回解析后的 tool 调用参数。"""
+    import time
 
     # 过滤出当前题型对应的 tool
     tools = [t for t in ALL_TOOLS if t["function"]["name"] == tool_name]
 
+    llm_t0 = time.perf_counter()
     response = await llm_client.chat(
         model=model,
         messages=[
@@ -49,6 +52,7 @@ async def _call_writer_llm(
         tools=tools,
         temperature=temperature,
     )
+    llm_elapsed = (time.perf_counter() - llm_t0) * 1000
 
     choice = response.choices[0]
     if not choice.message.tool_calls:
@@ -81,9 +85,11 @@ async def _call_writer_llm_batch(
     temperature: float = 0.7,
 ) -> list[dict]:
     """批量调用 LLM 生成多道题目，返回解析后的 tool 调用参数列表。"""
+    import time
 
     tools = [t for t in ALL_TOOLS if t["function"]["name"] == tool_name]
 
+    llm_t0 = time.perf_counter()
     response = await llm_client.chat(
         model=model,
         messages=[
@@ -93,6 +99,7 @@ async def _call_writer_llm_batch(
         tools=tools,
         temperature=temperature,
     )
+    llm_elapsed = (time.perf_counter() - llm_t0) * 1000
 
     choice = response.choices[0]
 
@@ -125,6 +132,7 @@ async def _call_writer_llm_batch(
     if not results:
         raise RuntimeError("批量调用未返回任何有效的 tool 调用")
 
+    # debug 日志由调用方（generate_*_all）统一记录，避免重复
     return results
 
 
@@ -253,6 +261,9 @@ async def generate_choice_all(
 
     user_prompt = "请根据上述规划信息，为每道题目生成内容，通过 tool call 提交。"
 
+    import time
+
+    gen_t0 = time.perf_counter()
     try:
         args_list = await _call_writer_llm_batch(
             model=model,
@@ -276,6 +287,8 @@ async def generate_choice_all(
             db.add(log)
         await db.flush()
         raise GenerationError(f"批量生成选择题失败: {exc}") from exc
+
+    gen_elapsed = (time.perf_counter() - gen_t0) * 1000
 
     # 构造 Question ORM 列表
     questions: list[Question] = []
@@ -319,6 +332,15 @@ async def generate_choice_all(
                 stage=None,
             )
         await db.commit()
+
+    await log_step(
+        job_id=str(job_id),
+        name="generate_choice_all",
+        stage="generating",
+        input={"model": model, "plan_count": len(plan_items)},
+        output={"generated": len(questions)},
+        elapsed_ms=gen_elapsed,
+    )
 
     return questions
 
@@ -366,6 +388,9 @@ async def generate_blank_all(
 
     user_prompt = "请根据上述规划信息，为每道题目生成内容，通过 tool call 提交。"
 
+    import time
+
+    gen_t0 = time.perf_counter()
     try:
         args_list = await _call_writer_llm_batch(
             model=model,
@@ -389,6 +414,8 @@ async def generate_blank_all(
             db.add(log)
         await db.flush()
         raise GenerationError(f"批量生成填空题失败: {exc}") from exc
+
+    gen_elapsed = (time.perf_counter() - gen_t0) * 1000
 
     # 构造 Question ORM 列表
     questions: list[Question] = []
@@ -432,6 +459,15 @@ async def generate_blank_all(
             )
         await db.commit()
 
+    await log_step(
+        job_id=str(job_id),
+        name="generate_blank_all",
+        stage="generating",
+        input={"model": model, "plan_count": len(plan_items)},
+        output={"generated": len(questions)},
+        elapsed_ms=gen_elapsed,
+    )
+
     return questions
 
 
@@ -446,6 +482,9 @@ async def generate_short_single(
     retry_count_map: dict[uuid.UUID, int] | None = None,
 ) -> Question:
     """简答题 agent：每题一个 agent。"""
+    import time
+
+    gen_t0 = time.perf_counter()
     q = await generate_single_question(
         db=db,
         job_id=job_id,
@@ -455,6 +494,8 @@ async def generate_short_single(
         knowledge_context=knowledge_context,
         retry_count=retry_count_map.get(plan_item.id, 0) if retry_count_map else 0,
     )
+    gen_elapsed = (time.perf_counter() - gen_t0) * 1000
+
     if bus:
         await bus.emit(
             job_id,
@@ -468,4 +509,13 @@ async def generate_short_single(
             stage=None,
         )
         await db.commit()
+
+    await log_step(
+        job_id=str(job_id),
+        name="generate_short_single",
+        stage="generating",
+        input={"model": model, "seq": plan_item.seq},
+        output={"seq": q.seq},
+        elapsed_ms=gen_elapsed,
+    )
     return q

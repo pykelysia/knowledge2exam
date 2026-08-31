@@ -11,6 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.llm import llm_client
 from app.agents.prompts import load_prompt
+from app.config import settings
+from app.core.debug_log import log_step
 from app.models.question import Question
 from app.orchestration.events import EventBus
 from app.orchestration.state_machine import Stage
@@ -63,6 +65,9 @@ async def run_reviewer(
     template = load_prompt("reviewer")
     prompt = template.format(questions_with_plan_items=json.dumps(questions_with_plan, ensure_ascii=False, indent=2))
 
+    import time
+
+    llm_t0 = time.perf_counter()
     response = await llm_client.chat(
         model=model,
         messages=[
@@ -71,6 +76,7 @@ async def run_reviewer(
         ],
         temperature=0.2,
     )
+    llm_elapsed = (time.perf_counter() - llm_t0) * 1000
 
     choice = response.choices[0]
     content = choice.message.content or ""
@@ -114,6 +120,21 @@ async def run_reviewer(
         stage=Stage.reviewing.value,
     )
     await db.commit()
+
+    await log_step(
+        job_id=str(job_id),
+        name="run_reviewer",
+        step="result",
+        stage=Stage.reviewing.value,
+        input={"model": model, "question_count": len(questions)},
+        output={
+            "checked": len(questions),
+            "passed": len(questions) - len(rejected),
+            "rejected_count": len(rejected),
+            "auto_fixed_count": len(auto_fixed),
+        },
+        elapsed_ms=llm_elapsed,
+    )
 
     return ReviewResult(
         checked=len(questions),

@@ -16,6 +16,7 @@ from app.agents.compressor import compress_text
 from app.agents.llm import llm_client
 from app.agents.prompts import load_prompt
 from app.config import settings
+from app.core.debug_log import log_step
 from app.models.plan import PlanItem
 from app.orchestration.events import EventBus
 from app.orchestration.state_machine import Stage
@@ -437,10 +438,13 @@ async def run_planner(
     ) + distribution_hint + replacement_hint
 
     # 5. 调用 LLM
+    import time
+
     max_retries = 3
     plan_items_raw: list[dict[str, Any]] = []
 
     for attempt in range(max_retries):
+        llm_t0 = time.perf_counter()
         response = await llm_client.chat(
             model=context.get("planner_model", "gpt-4o"),
             messages=[
@@ -448,6 +452,24 @@ async def run_planner(
                 {"role": "user", "content": prompt},
             ],
             temperature=0.3,
+        )
+        llm_elapsed = (time.perf_counter() - llm_t0) * 1000
+
+        await log_step(
+            job_id=str(job_id),
+            name="llm_planner",
+            step="llm",
+            stage=Stage.planning.value,
+            input={
+                "model": context.get("planner_model", "gpt-4o"),
+                "prompt_chars": len(prompt),
+                "attempt": attempt + 1,
+            },
+            output={
+                "plan_items_count": len(plan_items_raw),
+                "elapsed_ms": round(llm_elapsed, 1),
+            },
+            elapsed_ms=llm_elapsed,
         )
 
         # 解析 LLM 返回的 plan_item 列表
@@ -530,6 +552,19 @@ async def run_planner(
     # 计算实际总耗时
     actual_total_time = sum(
         distribution.get(qt, 0) * _UNIT_TIME.get(qt, 0) for qt in question_types
+    )
+
+    await log_step(
+        job_id=str(job_id),
+        name="run_planner",
+        step="result",
+        stage=Stage.planning.value,
+        input={"plan_items_count": len(plan_items_raw)},
+        output={
+            "plan_items": len(plan_items),
+            "distribution": distribution,
+            "estimated_time": round(actual_total_time, 1),
+        },
     )
 
     await bus.emit(
