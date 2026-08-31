@@ -38,8 +38,20 @@ from app.rendering.renderer import _get_renderer
 from app.retrieval.past_papers import past_paper_cache
 from app.retrieval.vector_store import PgVectorStore
 
+from app.core.debug_log import log_error, log_step
+
 MAX_QUESTION_RETRY = 3
 MAX_REVIEW_CYCLES = 5
+
+
+async def _get_job_upload_ids(db: AsyncSession, job_id: uuid.UUID) -> list[uuid.UUID]:
+    """从 job_upload 中间表获取某个 job 关联的 upload_id 列表。"""
+    from app.models.job import JobUpload
+
+    result = await db.scalars(
+        select(JobUpload.upload_id).where(JobUpload.job_id == job_id)
+    )
+    return list(result.all())
 
 
 def _write_retry_log(
@@ -85,14 +97,26 @@ async def run_pipeline(job_id: uuid.UUID) -> None:
         try:
             await _run_real_pipeline(db, job, bus)
         except Exception as exc:
-            logging.getLogger(__name__).error(
-                "真实 pipeline 失败: %s", exc, exc_info=True
+            await log_error(
+                job_id=str(job.id),
+                exc=exc,
+                stage=Stage.preprocessing.value,
+                context={"has_llm": has_llm},
             )
             raise
 
 
 async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
     """真实 pipeline：preprocessing -> planning -> fan-out -> reviewer -> rendering。"""
+    import time
+
+    t0 = time.perf_counter()
+    await log_step(
+        job_id=str(job.id),
+        name="_run_real_pipeline",
+        stage=Stage.preprocessing.value,
+        input={"upload_count": len(await _get_job_upload_ids(db, job.id))},
+    )
 
     # ---------- preprocessing ----------
     job.status = JobStatus.preprocessing.value
@@ -104,7 +128,23 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
     await db.commit()
 
     # 真实解析、切块、嵌入
+    import time
+
+    pre_t0 = time.perf_counter()
     context = await _preprocess(db, job, bus)
+    pre_elapsed = (time.perf_counter() - pre_t0) * 1000
+
+    await log_step(
+        job_id=str(job.id),
+        name="_preprocess",
+        stage=Stage.preprocessing.value,
+        input={"upload_count": len(await _get_job_upload_ids(db, job.id))},
+        output={
+            "past_papers": len(context.get("past_papers_full_text_or_none") or ""),
+            "shared_summary": bool(context.get("shared_library_summary")),
+        },
+        elapsed_ms=pre_elapsed,
+    )
 
     # ---------- planning ----------
     job.status = JobStatus.planning.value
@@ -130,6 +170,14 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
         },
     )
 
+    await log_step(
+        job_id=str(job.id),
+        name="run_planner",
+        stage=Stage.planning.value,
+        input={"model": getattr(settings, "planner_model", "gpt-4o")},
+        output={"plan_items": len(plan_items)},
+    )
+
     job.planned_total = len(plan_items)
     await db.commit()
 
@@ -151,6 +199,17 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
         writer_model=getattr(settings, "writer_model", "gpt-4o-mini"),
         knowledge_context="",
         max_concurrent=getattr(settings, "max_concurrent_writers", 4),
+    )
+
+    distribution: dict[str, int] = {}
+    for p in plan_items:
+        distribution[p.question_type] = distribution.get(p.question_type, 0) + 1
+    await log_step(
+        job_id=str(job.id),
+        name="run_fanout",
+        stage=Stage.generating.value,
+        input={"plan_count": len(plan_items), "max_concurrent": getattr(settings, "max_concurrent_writers", 4)},
+        output={"distribution": distribution},
     )
 
     # ---------- reviewing (with retry loop) ----------
@@ -208,6 +267,9 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
         need_explanation=job.need_explanation,
     )
 
+    import time
+
+    render_t0 = time.perf_counter()
     md_key = f"jobs/{job.id}/output/paper.md"
     from app.core.storage import storage
     await storage.put(md_key, md_text.encode("utf-8"))
@@ -232,6 +294,16 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
 
     pdf_key = f"jobs/{job.id}/output/paper.pdf"
     await storage.put(pdf_key, result.pdf)
+    render_elapsed = (time.perf_counter() - render_t0) * 1000
+
+    await log_step(
+        job_id=str(job.id),
+        name="rendering",
+        stage=Stage.rendering.value,
+        input={"questions_count": len(questions_with_plan), "md_chars": len(md_text)},
+        output={"pdf_failed": result.pdf_failed},
+        elapsed_ms=render_elapsed,
+    )
 
     job.md_key = md_key
     job.pdf_key = None if result.pdf_failed else pdf_key
@@ -301,7 +373,18 @@ async def _run_review_with_retry(
             model=reviewer_model,
         )
 
+        import time
+
+        review_elapsed = 0  # 可通过 reviewer 返回值补充
         rejected_qs = [q for q in questions if q.review_passed is False]
+        await log_step(
+            job_id=str(job.id),
+            name="run_reviewer",
+            stage=Stage.reviewing.value,
+            input={"model": reviewer_model, "question_count": len(questions), "cycle": cycle + 1},
+            output={"passed": len(questions) - len(rejected_qs), "rejected": len(rejected_qs)},
+            elapsed_ms=review_elapsed,
+        )
         if not rejected_qs:
             break
 
@@ -379,8 +462,15 @@ async def _run_review_with_retry(
                     },
                 )
             except Exception as exc:
-                logging.getLogger(__name__).error(
-                    "Planner 换题调用失败，回退到直接复制逻辑: %s", exc, exc_info=True
+                await log_error(
+                    job_id=str(job.id),
+                    exc=exc,
+                    stage=Stage.reviewing.value,
+                    context={
+                        "cycle": cycle + 1,
+                        "mode": "replacement",
+                        "planner_model": getattr(settings, "planner_model", "gpt-4o"),
+                    },
                 )
                 new_plan_items = []
 
@@ -414,6 +504,17 @@ async def _run_review_with_retry(
                         )
                         await db.commit()
                 except Exception as exc:
+                    await log_error(
+                        job_id=str(job.id),
+                        exc=exc,
+                        stage=Stage.reviewing.value,
+                        context={
+                            "cycle": cycle + 1,
+                            "mode": "new_plan_generation",
+                            "plan_seq": new_plan.seq,
+                            "writer_model": writer_model,
+                        },
+                    )
                     _write_retry_log(
                         db, None, new_plan.id, 0,
                         "generation_failed", False,
@@ -462,6 +563,17 @@ async def _run_review_with_retry(
                             )
                             await db.commit()
                     except Exception as exc:
+                        await log_error(
+                            job_id=str(job.id),
+                            exc=exc,
+                            stage=Stage.reviewing.value,
+                            context={
+                                "cycle": cycle + 1,
+                                "mode": "fallback_generation",
+                                "plan_seq": fallback_plan.seq,
+                                "writer_model": writer_model,
+                            },
+                        )
                         _write_retry_log(
                             db, None, fallback_plan.id, 0,
                             "generation_failed", False,
@@ -742,7 +854,7 @@ async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, An
     # 1. 加载 uploads
     upload_rows = (
         await db.scalars(
-            select(Upload).where(Upload.id.in_(job.upload_ids))
+            select(Upload).where(Upload.id.in_(await _get_job_upload_ids(db, job.id)))
         )
     ).all()
     uploads = list(upload_rows)
@@ -759,32 +871,43 @@ async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, An
     additive_chunks: dict[str, list[Any]] = {}
     exclusive_texts: dict[str, list[str]] = {}
 
-    # 3. 逐文件解析
+    # 3. 逐文件/文本解析
+    from app.core.enums import TEXT_SOURCE_TYPES
+
     for upload in uploads:
-        parser = get_parser(upload.filename or "")
-        try:
-            data = await storage.get(upload.storage_key)
-            result = await parser.parse(upload.filename or "", data)
-
-            # 图片后处理：去重、合并、间隙标记
-            if result.images:
-                process_images(result.images)
-                image_text = build_merged_text(result.images)
-                if image_text:
-                    result.text = result.text + "\n\n" + image_text
-                    result.char_count = len(result.text)
-
+        # 文本类上传（manual_text / extra_requirement）没有 filename，
+        # 直接使用 raw_text，无需调用文件解析器。
+        if upload.source_type in TEXT_SOURCE_TYPES:
+            text = upload.raw_text or ""
+            char_count = len(text)
             upload.parse_status = "succeeded"
-        except Exception as exc:
-            upload.parse_status = "failed"
-            upload.parse_error = str(exc)
-            await bus.emit(job.id, "warning", {
-                "code": ErrorCode.PARSE_FAILED,
-                "upload_id": upload.id,
-                "message": str(exc),
-            })
-            await db.commit()
-            continue
+        else:
+            parser = get_parser(upload.filename or "")
+            try:
+                data = await storage.get(upload.storage_key)
+                result = parser.parse(upload.filename or "", data)
+
+                # 图片后处理：去重、合并、间隙标记
+                if result.images:
+                    process_images(result.images)
+                    image_text = build_merged_text(result.images)
+                    if image_text:
+                        result.text = result.text + "\n\n" + image_text
+                        result.char_count = len(result.text)
+
+                text = result.text
+                char_count = result.char_count
+                upload.parse_status = "succeeded"
+            except Exception as exc:
+                upload.parse_status = "failed"
+                upload.parse_error = str(exc)
+                await bus.emit(job.id, "warning", {
+                    "code": ErrorCode.PARSE_FAILED,
+                    "upload_id": upload.id,
+                    "message": str(exc),
+                })
+                await db.commit()
+                continue
 
         # 创建 resource
         resource = Resource(
@@ -792,7 +915,7 @@ async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, An
             source_type=upload.source_type,
             school_id=job.school_id,
             course_id=job.course_id,
-            char_count=result.char_count,
+            char_count=char_count,
             is_shared=upload.shareable and job.school_id is not None and job.course_id is not None,
         )
         db.add(resource)
@@ -801,15 +924,20 @@ async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, An
         # 存解析产物到对象存储
         parsed_key = f"jobs/{job.id}/parsed/{resource.id}.json"
         import json
-        await storage.put(parsed_key, json.dumps(result.text).encode("utf-8"))
+        await storage.put(parsed_key, json.dumps(text).encode("utf-8"))
 
         if upload.source_type == SourceType.past_paper:
             # 往期试卷：全文进快读缓存
-            past_papers[upload.filename or "unnamed"] = result
+            # 构造一个轻量结果对象，保留 .text 以便后续统一处理
+            class _PaperResult:
+                pass
+
+            past_papers[upload.filename or "unnamed"] = _PaperResult()
+            past_papers[upload.filename or "unnamed"].text = text
         elif upload.source_type in FILE_SOURCE_TYPES - {SourceType.past_paper}:
             # 可向量化的类型：切块 + 嵌入
             chunks = chunker.chunk(
-                result.text,
+                text,
                 page=None,
                 source_type=upload.source_type,
             )
@@ -835,7 +963,7 @@ async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, An
             if upload.source_type in _ADDITIVE_TYPES:
                 additive_chunks.setdefault(upload.source_type.value, []).extend(chunks)
             else:
-                exclusive_texts.setdefault(upload.source_type.value, []).append(result.text)
+                exclusive_texts.setdefault(upload.source_type.value, []).append(text)
 
     # 4. 存快读缓存
     past_paper_cache.set(job.id, past_papers)

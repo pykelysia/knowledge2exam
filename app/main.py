@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import logging
+from datetime import UTC, datetime
+from pathlib import Path
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,6 +21,27 @@ app = FastAPI(
     version="1.0.0",
     description="试卷生成工具后端接口（REST + SSE）。",
 )
+
+
+def _setup_debug_logger() -> None:
+    """配置 debug logger。
+
+    - `log_step` 的输出仍受 ``settings.debug_mode`` 控制（在 debug_log.py 内判断）。
+    - file handler 始终注册，确保 ``log_error`` 的错误信息无论 debug_mode 如何都能落盘。
+    """
+    debug_logger = logging.getLogger("k2e.debug")
+    debug_logger.setLevel(logging.DEBUG)  # 允许所有级别通过，过滤在调用方
+
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+
+    log_file = log_dir / f"debug_{datetime.now(UTC):%Y%m%d}.log"
+    handler = logging.FileHandler(log_file, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    debug_logger.addHandler(handler)
+
+
+_setup_debug_logger()
 
 app.add_middleware(
     CORSMiddleware,
