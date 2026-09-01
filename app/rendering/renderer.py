@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from app.rendering.setup import ensure_pandoc_available
+
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +91,11 @@ class PandocXeLaTeXRenderer(Renderer):
             except (json.JSONDecodeError, ValueError):
                 logger.warning("PDF_EXTRA_ARGS 解析失败，忽略: %s", extra)
 
+        # 启动时已保证 pandoc 可用，此处缓存路径避免重复检测
+        self._pandoc_path: str | None = ensure_pandoc_available(
+            auto_install=True, raise_on_missing=True
+        )
+
     @staticmethod
     def _detect_chinese_font() -> str | None:
         """尝试自动检测系统中可用的中文字体。"""
@@ -123,11 +130,10 @@ class PandocXeLaTeXRenderer(Renderer):
         md_text = self._build_markdown(title, questions)
         md_bytes = md_text.encode("utf-8")
 
-        # 2. 检查依赖
-        pandoc = shutil.which("pandoc")
+        # 2. 使用启动时缓存的 pandoc 路径
+        pandoc = self._pandoc_path
         if not pandoc:
-            msg = "pandoc 未安装，无法渲染 PDF。请安装 pandoc。"
-            raise RuntimeError(msg)
+            raise RuntimeError("pandoc 路径未初始化")
 
         # 3. 构建 pandoc 命令
         cmd: list[str] = [

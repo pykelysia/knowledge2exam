@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from app.api import artifacts, auth, catalog, jobs, uploads
 from app.config import settings
 from app.core.exceptions import AppException, ErrorCode
+from app.rendering.setup import ensure_pandoc_available
 from app.schemas.common import ErrorResponse
 
 app = FastAPI(
@@ -58,6 +59,12 @@ app.include_router(uploads.router, prefix=API_PREFIX)
 app.include_router(jobs.router, prefix=API_PREFIX)
 app.include_router(artifacts.router, prefix=API_PREFIX)
 app.include_router(catalog.router, prefix=API_PREFIX)
+
+
+@app.on_event("startup")
+async def _ensure_pandoc() -> None:
+    """启动时强制检查并安装 pandoc。"""
+    ensure_pandoc_available(auto_install=True, raise_on_missing=True)
 
 
 @app.exception_handler(AppException)
