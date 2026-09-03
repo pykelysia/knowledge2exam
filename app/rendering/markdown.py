@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import re
+
 from app.schemas.job import Stage
 
 
@@ -87,6 +89,46 @@ def _answer_block(q: Any, seq: int, show_explanation: bool) -> list[str]:
     return lines
 
 
+def _clean_literal_escapes(md_text: str) -> str:
+    """清理 markdown 中的字面量转义序列（如 `\\n`、`\\t`），避免 Pandoc 渲染为 PDF 时生成无效 LaTeX。
+
+    LLM 有时会生成包含字面量 ``\\n``/``\\t`` 的代码片段，而不是真正的换行/制表符。
+    此函数会：
+    - 识别围栏代码块（fenced code blocks）内的字面量转义序列，并将其替换为实际字符；
+    - 同时清理围栏代码块标记周围多余的空白，确保 Pandoc 正确识别代码块。
+    """
+    # 匹配模式：字面量 \n + ```lang + 字面量 \n + 代码内容 + 字面量 \n + ```
+    # 使用 DOTALL 使 . 能匹配换行
+    fence_pattern = re.compile(
+        r"(?:\\n|\n)(```(?:[a-zA-Z0-9_+-]*)(?:\\n|\n))(.*?)((?:\\n|\n)```)",
+        re.DOTALL,
+    )
+
+    def _replace_escapes_in_code(match: re.Match) -> str:
+        opening = match.group(1)  # 包含 ```lang\n 或 ```lang
+        code = match.group(2)
+        closing = match.group(3)  # 包含 \n``` 或 \n```
+        # 将围栏标记中的字面量 \n 转换为实际换行
+        opening = opening.replace("\\n", "\n")
+        closing = closing.replace("\\n", "\n")
+        # 将代码内的字面量转义序列替换为实际字符
+        code = code.replace("\\n", "\n")
+        code = code.replace("\\t", "\t")
+        code = code.replace('\\"', '"')
+        code = code.replace("\\'", "'")
+        # 确保代码块前后都有实际换行
+        result = f"\n{opening}{code}{closing}"
+        return result
+
+    md_text = fence_pattern.sub(_replace_escapes_in_code, md_text)
+
+    # 清理单独出现在行尾的 ``\n``（非代码块内），避免被 Pandoc 解释为 LaTeX 命令
+    md_text = re.sub(r"\\n", "\\\\n", md_text)
+    md_text = re.sub(r"\\t", "\\\\t", md_text)
+
+    return md_text
+
+
 def build_markdown(
     title: str,
     questions: list[tuple[Any, Any]],
@@ -162,4 +204,5 @@ def build_markdown(
         seq += 1
         lines.extend(_answer_block(q, seq, need_explanation))
 
-    return "\n".join(lines)
+    md_text = "\n".join(lines)
+    return _clean_literal_escapes(md_text)
