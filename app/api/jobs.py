@@ -250,7 +250,7 @@ async def cancel_job(
     await db.commit()
 
     bus = EventBus(db)
-    await bus.emit(job_id, "done", {"status": JobStatus.cancelled.value})
+    await bus.emit_and_close(job_id, "done", {"status": JobStatus.cancelled.value})
     await db.commit()
     return Response(status_code=204)
 
