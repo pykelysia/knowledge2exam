@@ -30,7 +30,6 @@ class EventBus:
         self, job_id: uuid.UUID, event_type: str, data: dict[str, Any], stage: str | None = None
     ) -> int:
         """落盘一条事件，返回其 seq。"""
-        # 计算下一个 seq
         max_seq = await self.db.scalar(
             select(func.coalesce(func.max(JobStage.seq), 0)).where(JobStage.job_id == job_id)
         )
@@ -47,9 +46,17 @@ class EventBus:
         )
         await self.db.flush()
 
-        # 广播给订阅者
         for q in list(_subscribers.get(job_id, set())):
             q.put_nowait({"seq": seq, "event": event_type, "data": data})
+        return seq
+
+    async def emit_and_close(
+        self, job_id: uuid.UUID, event_type: str, data: dict[str, Any], stage: str | None = None
+    ) -> int:
+        """落盘事件并向所有 SSE 订阅者发送关闭信号。"""
+        seq = await self.emit(job_id, event_type, data, stage)
+        for q in list(_subscribers.get(job_id, set())):
+            q.put_nowait({"__close__": True, "seq": seq})
         return seq
 
 
