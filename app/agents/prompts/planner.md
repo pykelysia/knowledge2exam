@@ -23,3 +23,8 @@
 
 请输出 plan_item 列表，字段：seq, question_type, knowledge_point, exam_direction,
 difficulty, reference_source（可空）。输出为 JSON 数组。
+
+question_type 必须为以下英文枚举值之一：
+- choice：选择题
+- blank：填空题
+- short_answer：简答题/论述题/计算题

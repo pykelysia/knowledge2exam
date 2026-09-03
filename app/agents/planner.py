@@ -31,12 +31,31 @@ _UNIT_TIME = {
     "short_answer": 6.0,
 }
 
-# 默认题型占比模板（无往期试卷时使用）
 _DEFAULT_PROPORTIONS = {
     "choice": 0.20,
     "blank": 0.20,
     "short_answer": 0.60,
 }
+
+# 中文 -> 英文枚举映射（兼容 LLM 输出中文的情况）
+_QUESTION_TYPE_ALIASES: dict[str, str] = {
+    "选择题": "choice",
+    "单选题": "choice",
+    "多选题": "choice",
+    "填空题": "blank",
+    "简答题": "short_answer",
+    "论述题": "short_answer",
+    "计算题": "short_answer",
+}
+
+
+def _normalize_question_type(raw: str) -> str:
+    """将 LLM 返回的 question_type 标准化为英文枚举值。"""
+    key = raw.strip().lower()
+    if key in {"choice", "blank", "short_answer"}:
+        return key
+    # 中文映射
+    return _QUESTION_TYPE_ALIASES.get(raw.strip(), "choice")
 
 # 相对变动容忍度
 _RELATIVE_TOLERANCE = 0.10
@@ -533,7 +552,7 @@ async def run_planner(
         plan = PlanItem(
             job_id=job_id,
             seq=seq,
-            question_type=item.get("question_type", "choice"),
+            question_type=_normalize_question_type(item.get("question_type", "choice")),
             knowledge_point=item.get("knowledge_point", ""),
             exam_direction=item.get("exam_direction", ""),
             difficulty=item.get("difficulty", "medium"),
