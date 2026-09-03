@@ -54,6 +54,22 @@ async def _get_job_upload_ids(db: AsyncSession, job_id: uuid.UUID) -> list[uuid.
     return list(result.all())
 
 
+async def _check_cancelled(db: AsyncSession, job_id: uuid.UUID, bus: EventBus) -> bool:
+    """检查 job 是否已被取消，如果是则发送 done 事件并返回 True。"""
+    from app.models.job import Job
+
+    job = await db.get(Job, job_id)
+    if job and job.status == JobStatus.cancelled.value:
+        await bus.emit_and_close(
+            job_id,
+            "done",
+            {"status": JobStatus.cancelled.value},
+        )
+        await db.commit()
+        return True
+    return False
+
+
 def _write_retry_log(
     db: AsyncSession,
     question_id: uuid.UUID | None,
@@ -110,6 +126,9 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
     """真实 pipeline：preprocessing -> planning -> fan-out -> reviewer -> rendering。"""
     import time
 
+    if await _check_cancelled(db, job.id, bus):
+        return
+
     t0 = time.perf_counter()
     await log_step(
         job_id=str(job.id),
@@ -119,6 +138,8 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
     )
 
     # ---------- preprocessing ----------
+    if await _check_cancelled(db, job.id, bus):
+        return
     job.status = JobStatus.preprocessing.value
     await bus.emit(
         job.id, "stage_changed",
@@ -147,6 +168,8 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
     )
 
     # ---------- planning ----------
+    if await _check_cancelled(db, job.id, bus):
+        return
     job.status = JobStatus.planning.value
     await bus.emit(
         job.id, "stage_changed",
@@ -182,6 +205,8 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
     await db.commit()
 
     # ---------- generating (fan-out) ----------
+    if await _check_cancelled(db, job.id, bus):
+        return
     job.status = JobStatus.generating.value
     await bus.emit(
         job.id, "stage_changed",
@@ -214,6 +239,8 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
 
     # ---------- reviewing (with retry loop) ----------
     if job.enable_review:
+        if await _check_cancelled(db, job.id, bus):
+            return
         await _run_review_with_retry(
             db=db,
             job=job,
@@ -227,6 +254,8 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
         )
 
     # ---------- rendering ----------
+    if await _check_cancelled(db, job.id, bus):
+        return
     previous_stage = Stage.reviewing if job.enable_review else Stage.generating
     job.status = JobStatus.rendering.value
     await bus.emit(
@@ -317,7 +346,7 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
     # 统计废弃题目数
     abandoned_count = sum(1 for q in questions if q.status == "abandoned")
 
-    await bus.emit(
+    await bus.emit_and_close(
         job.id, "done",
         {
             "status": job.status,
@@ -663,6 +692,9 @@ async def run_mock_pipeline(job_id: uuid.UUID) -> None:
             return
         bus = EventBus(db)
 
+        if await _check_cancelled(db, job_id, bus):
+            return
+
         job.status = JobStatus.preprocessing.value
         await bus.emit(
             job.id, "stage_changed",
@@ -672,6 +704,8 @@ async def run_mock_pipeline(job_id: uuid.UUID) -> None:
         await db.commit()
         await asyncio.sleep(getattr(settings, "mock_stage_delay_seconds", 0.5))
 
+        if await _check_cancelled(db, job_id, bus):
+            return
         job.status = JobStatus.planning.value
         await bus.emit(
             job.id, "stage_changed",
@@ -695,6 +729,8 @@ async def run_mock_pipeline(job_id: uuid.UUID) -> None:
         await db.commit()
         await asyncio.sleep(getattr(settings, "mock_stage_delay_seconds", 0.5))
 
+        if await _check_cancelled(db, job_id, bus):
+            return
         job.status = JobStatus.generating.value
         await bus.emit(
             job.id, "stage_changed",
@@ -759,6 +795,8 @@ async def run_mock_pipeline(job_id: uuid.UUID) -> None:
             await asyncio.sleep(getattr(settings, "mock_stage_delay_seconds", 0.5))
 
         if job.enable_review:
+            if await _check_cancelled(db, job_id, bus):
+                return
             job.status = JobStatus.reviewing.value
             await bus.emit(
                 job.id, "stage_changed",
@@ -777,6 +815,8 @@ async def run_mock_pipeline(job_id: uuid.UUID) -> None:
             await asyncio.sleep(getattr(settings, "mock_stage_delay_seconds", 0.5))
 
         previous = Stage.reviewing if job.enable_review else Stage.generating
+        if await _check_cancelled(db, job_id, bus):
+            return
         job.status = JobStatus.rendering.value
         await bus.emit(
             job.id, "stage_changed",
@@ -812,7 +852,7 @@ async def run_mock_pipeline(job_id: uuid.UUID) -> None:
         job.status = JobStatus.completed.value
         await db.commit()
 
-        await bus.emit(
+        await bus.emit_and_close(
             job.id, "done",
             {
                 "status": JobStatus.completed.value,
