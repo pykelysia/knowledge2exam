@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { getJob, deleteJob } from '@/api/jobs'
+import { getJob, deleteJob, cancelJob } from '@/api/jobs'
 import { useAuth } from '@/hooks/useAuth'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -63,6 +63,16 @@ export function Jobs() {
     } catch (err) {
       const apiErr = extractApiError(err)
       alert(apiErr ? errorMessage(apiErr.error_code) : '删除失败')
+    }
+  }
+
+  async function handleCancel(jobId: string) {
+    try {
+      await cancelJob(jobId)
+      setJobs((prev) => prev.filter((j) => j.job_id !== jobId))
+    } catch (err) {
+      const apiErr = extractApiError(err)
+      alert(apiErr ? errorMessage(apiErr.error_code) : '取消失败')
     }
   }
 
@@ -141,13 +151,22 @@ export function Jobs() {
                   {['pending', 'preprocessing', 'planning', 'generating', 'reviewing', 'rendering'].includes(
                     job.status,
                   ) && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => handleDelete(job.job_id)}
-                    >
-                      删除
-                    </Button>
+                    <>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => handleCancel(job.job_id)}
+                      >
+                        取消
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleDelete(job.job_id)}
+                      >
+                        删除
+                      </Button>
+                    </>
                   )}
                 </div>
               </li>

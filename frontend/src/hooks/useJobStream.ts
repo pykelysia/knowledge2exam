@@ -81,11 +81,21 @@ export function useJobStream({ jobId, onEvent }: UseJobStreamOptions) {
     const listeners: Array<[string, (e: MessageEvent) => void]> = eventTypes.map((type) => {
       const handler = (e: MessageEvent) => {
         try {
-          const data = JSON.parse(e.data as string) as JobEvent['data']
+          const raw = JSON.parse(e.data as string) as JobEvent['data'] & { __close__?: boolean }
+          // 优先处理关闭信号（不回调 onEvent）
+          if (raw.__close__) {
+            es?.close()
+            return
+          }
           const seq = (e as MessageEvent & { lastEventId?: string }).lastEventId
             ? Number((e as MessageEvent & { lastEventId?: string }).lastEventId)
             : undefined
-          onEventRef.current(type, data, Number.isFinite(seq) ? seq : undefined)
+          onEventRef.current(type, raw, Number.isFinite(seq) ? seq : undefined)
+
+          // 收到 done 事件后主动断开连接（取消/完成/失败/部分完成均适用）
+          if (type === 'done') {
+            es?.close()
+          }
         } catch {
           // 忽略无法解析的帧。
         }

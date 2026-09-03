@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { getJob, cancelJob, listQuestions, resolveArtifactUrl } from '@/api/jobs'
 import { useJobStream } from '@/hooks/useJobStream'
@@ -25,6 +25,7 @@ export function JobDetail() {
   const [error, setError] = useState<string | null>(null)
   const [logs, setLogs] = useState<string[]>([])
   const [reviewResult, setReviewResult] = useState<ReviewResultData | null>(null)
+  const timerRef = useRef<number | null>(null)
 
   // 轮询降级 + 初始快照。
   useEffect(() => {
@@ -43,10 +44,13 @@ export function JobDetail() {
       }
     }
     load()
-    const timer = setInterval(load, 5000)
+    timerRef.current = window.setInterval(load, 5000)
     return () => {
       cancelled = true
-      clearInterval(timer)
+      if (timerRef.current) {
+        clearInterval(timerRef.current)
+        timerRef.current = null
+      }
     }
   }, [jobId])
 
@@ -114,7 +118,15 @@ export function JobDetail() {
     onEvent: handleEvent,
   })
 
-  // 任务进入可展示阶段后拉取题目。
+  // 任务进入终态后停止轮询。
+  useEffect(() => {
+    if (!job || !jobId) return
+    const terminalStatuses = ['completed', 'partially_completed', 'failed', 'cancelled']
+    if (terminalStatuses.includes(job.status) && timerRef.current) {
+      clearInterval(timerRef.current)
+      timerRef.current = null
+    }
+  }, [job?.status, jobId, job])
   useEffect(() => {
     if (!jobId || !job) return
     if (job.status === 'generating' || job.status === 'reviewing' || job.status === 'rendering' || job.status === 'completed' || job.status === 'partially_completed') {
@@ -164,6 +176,11 @@ export function JobDetail() {
     if (!jobId) return
     try {
       await cancelJob(jobId)
+      // 取消后立即停止轮询，避免继续请求已取消任务。
+      if (timerRef.current) {
+        clearInterval(timerRef.current)
+        timerRef.current = null
+      }
       setLogs((prev) => [...prev, '已发出取消请求'])
     } catch (err) {
       const apiErr = extractApiError(err)
