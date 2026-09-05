@@ -2,28 +2,18 @@ import {
   createContext,
   useCallback,
   useContext,
-  useEffect,
   useMemo,
   useState,
   type ReactNode,
 } from 'react'
-import { login as apiLogin, logout as apiLogout, refresh as apiRefresh, register as apiRegister } from '@/api/auth'
-import { setSessionExpiredHandler } from '@/api/client'
-import {
-  clearTokens,
-  getRefreshToken,
-  setAccessToken,
-  setRefreshToken,
-} from '@/lib/token'
+import { login as apiLogin, logout as apiLogout, register as apiRegister } from '@/api/auth'
 import type { LoginRequest, RegisterRequest, User } from '@/api/types'
 
 interface AuthContextValue {
-  /** 当前登录用户；未登录或刷新后尚未恢复时为 null。 */
+  /** 当前登录用户；未登录时为 null。 */
   user: User | null
-  /** 是否有 access token（内存）。 */
+  /** 是否已认证。 */
   isAuthenticated: boolean
-  /** 正在尝试恢复/续期会话。 */
-  initializing: boolean
   login: (payload: LoginRequest) => Promise<void>
   register: (payload: RegisterRequest) => Promise<void>
   logout: () => Promise<void>
@@ -33,68 +23,20 @@ const AuthContext = createContext<AuthContextValue | null>(null)
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
-  const [initializing, setInitializing] = useState(true)
 
   const logout = useCallback(async () => {
-    const refreshToken = getRefreshToken()
-    // 尽力通知后端吊销；失败也照常清理本地状态。
-    if (refreshToken) {
-      try {
-        await apiLogout({ refresh_token: refreshToken })
-      } catch {
-        // 忽略——本地登出优先。
-      }
+    // 尽力通知后端清除 Cookie；失败也照常清理本地状态。
+    try {
+      await apiLogout()
+    } catch {
+      // 忽略——本地登出优先。
     }
-    clearTokens()
     setUser(null)
   }, [])
 
-  // 会话过期（refresh 失败 / 重放）时的兜底登出。
-  useEffect(() => {
-    setSessionExpiredHandler(() => {
-      clearTokens()
-      setUser(null)
-    })
-    return () => setSessionExpiredHandler(null)
-  }, [])
-
-  // 应用启动：若有 refresh token，说明此前登录过；但 user 信息无法从 token 中可靠还原，
-  // 这里仅清空 access token，让首次受保护请求触发透明续期。
-  // 更稳妥的做法是启动时主动 refresh 一次以恢复 user 信息——见下方 effect。
-  useEffect(() => {
-    const refreshToken = getRefreshToken()
-    if (!refreshToken) {
-      setInitializing(false)
-      return
-    }
-    // 主动续期一次，既能恢复 user，又能尽早发现 refresh token 已失效。
-    let cancelled = false
-    ;(async () => {
-      try {
-        const tokens = await apiRefresh({ refresh_token: refreshToken })
-        if (cancelled) return
-        setAccessToken(tokens.access_token)
-        setRefreshToken(tokens.refresh_token)
-        if (tokens.user) setUser(tokens.user)
-      } catch {
-        if (!cancelled) {
-          clearTokens()
-          setUser(null)
-        }
-      } finally {
-        if (!cancelled) setInitializing(false)
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
   const login = useCallback(async (payload: LoginRequest) => {
-    const tokens = await apiLogin(payload)
-    setAccessToken(tokens.access_token)
-    setRefreshToken(tokens.refresh_token)
-    if (tokens.user) setUser(tokens.user)
+    const user = await apiLogin(payload)
+    setUser(user)
   }, [])
 
   const register = useCallback(async (payload: RegisterRequest) => {
@@ -106,12 +48,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     () => ({
       user,
       isAuthenticated: user !== null,
-      initializing,
       login,
       register,
       logout,
     }),
-    [user, initializing, login, register, logout],
+    [user, login, register, logout],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

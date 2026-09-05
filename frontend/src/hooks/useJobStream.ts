@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react'
-import { getAccessToken } from '@/lib/token'
 import type { JobEvent, JobEventType } from '@/api/types'
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '/api/v1'
@@ -32,15 +31,9 @@ export function useJobStream({ jobId, onEvent }: UseJobStreamOptions) {
 
     let es: EventSource | null = null
     let disposed = false
-    let url = `${BASE_URL}/jobs/${jobId}/events`
+    const url = `${BASE_URL}/jobs/${jobId}/events`
 
-    // EventSource 无法自定义 Authorization 头，故在同源代理场景下把 access token
-    // 作为查询参数兜底（生产建议由网关注入 Cookie/令牌或改为 fetch 流式解析）。
-    const token = getAccessToken()
-    if (token) {
-      url += `${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`
-    }
-    // 服务端通过 Last-Event-ID 头续传；EventSource 重连时会自动带上最近收到的 id。
+    // Cookie 模式下浏览器自动携带认证 Cookie，无需附加 token 查询参数
 
     setConnectionState('connecting')
     setError(null)
