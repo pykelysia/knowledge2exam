@@ -31,3 +31,22 @@ export function resolveArtifactUrl(url: string | null | undefined): string | nul
   if (/^https?:\/\//.test(url)) return url
   return url
 }
+
+/** 通过 axios 下载产物文件，自动携带认证头并处理 blob 下载。 */
+export async function downloadArtifact(url: string, filename: string): Promise<void> {
+  const { data, headers } = await client.get(url, {
+    responseType: 'blob',
+  })
+
+  const blob = new Blob([data], { type: headers['content-type'] || 'application/octet-stream' })
+  const blobUrl = URL.createObjectURL(blob)
+
+  const a = document.createElement('a')
+  a.href = blobUrl
+  a.download = filename
+  a.style.display = 'none'
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(blobUrl)
+}
