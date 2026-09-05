@@ -39,21 +39,6 @@ export interface LoginRequest {
   password: string
 }
 
-export interface RefreshRequest {
-  refresh_token: string
-}
-
-export interface LogoutRequest {
-  refresh_token: string
-}
-
-export interface AuthTokens {
-  access_token: string
-  refresh_token: string
-  expires_in: number
-  user?: User
-}
-
 // ---- 上传 ----
 
 export interface Preview {
