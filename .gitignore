@@ -11,6 +11,7 @@ venv/
 
 # 本地存储（上传文件 / 产物）
 storage/
+test_datas/
 
 # 工具
 .pytest_cache/
@@ -18,3 +19,4 @@ storage/
 .mypy_cache/
 logs/
 scripts/
+test_scripts/

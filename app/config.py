@@ -28,6 +28,13 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 30
 
+    # Cookie 认证配置（替代双 JWT 的 Bearer 传输）
+    cookie_secure: bool = False  # 生产环境必须设为 True（仅 HTTPS 传输）
+    cookie_samesite: str = "lax"  # 允许顶级导航，防止跨站 CSRF
+    cookie_domain: str | None = None  # 生产环境可配置为域名（如 .example.com）
+    cookie_access_token_max_age: int = 15 * 60  # 与 access_token_expire_minutes 同步
+    cookie_refresh_token_max_age: int = 30 * 24 * 60 * 60  # 30 天
+
     # 对象存储（首版为本地文件系统）
     storage_dir: Path = Path("./storage")
 
