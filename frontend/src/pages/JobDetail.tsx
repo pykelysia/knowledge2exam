@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { getJob, cancelJob, listQuestions, resolveArtifactUrl } from '@/api/jobs'
+import { getJob, cancelJob, listQuestions, resolveArtifactUrl, downloadArtifact } from '@/api/jobs'
 import { useJobStream } from '@/hooks/useJobStream'
 import { extractApiError } from '@/api/client'
 import { JOB_STATUS_META, errorMessage } from '@/lib/constants'
@@ -235,24 +235,34 @@ export function JobDetail() {
           </CardHeader>
           <CardContent className="flex gap-3">
             {job.artifacts.md_url && (
-              <a
-                href={resolveArtifactUrl(job.artifacts.md_url)!}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-2 rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700"
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => {
+                  const url = resolveArtifactUrl(job.artifacts!.md_url!)!
+                  downloadArtifact(url, 'paper.md').catch((err) => {
+                    const apiErr = extractApiError(err)
+                    setError(apiErr ? errorMessage(apiErr.error_code) : '下载 Markdown 失败')
+                  })
+                }}
               >
                 下载 Markdown
-              </a>
+              </Button>
             )}
             {job.artifacts.pdf_url && (
-              <a
-                href={resolveArtifactUrl(job.artifacts.pdf_url)!}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-2 rounded-md bg-white px-4 py-2 text-sm font-medium text-slate-900 border border-slate-300 hover:bg-slate-100"
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => {
+                  const url = resolveArtifactUrl(job.artifacts!.pdf_url!)!
+                  downloadArtifact(url, 'paper.pdf').catch((err) => {
+                    const apiErr = extractApiError(err)
+                    setError(apiErr ? errorMessage(apiErr.error_code) : '下载 PDF 失败')
+                  })
+                }}
               >
                 下载 PDF
-              </a>
+              </Button>
             )}
             {!job.artifacts.pdf_url && job.status === 'partially_completed' && (
               <span className="text-sm text-slate-500">PDF 渲染失败，可下载 md 作为替代</span>
