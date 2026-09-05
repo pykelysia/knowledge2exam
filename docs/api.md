@@ -11,9 +11,9 @@ REST + SSE。所有端点前缀 `/api/v1`。请求与响应均为 JSON，除上�
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | POST | `/auth/register` | 注册账号 |
-| POST | `/auth/login` | 登录，返回 access + refresh 双 token |
-| POST | `/auth/refresh` | 刷新 access token，并轮换 refresh token |
-| POST | `/auth/logout` | 登出，吊销 refresh token |
+| POST | `/auth/login` | 登录，设置 httpOnly Cookie |
+| POST | `/auth/refresh` | 刷新 access token 并轮换 refresh token（通过 Cookie） |
+| POST | `/auth/logout` | 登出，清除 Cookie 并吊销 refresh token |
 | POST | `/uploads` | 上传单个文件或提交文本，返回 `upload_id` 与解析预览 |
 | DELETE | `/uploads/{upload_id}` | 删除尚未用于任务的上传件 |
 | POST | `/jobs` | 创建生成任务，返回 `job_id` |
@@ -29,7 +29,7 @@ REST + SSE。所有端点前缀 `/api/v1`。请求与响应均为 JSON，除上�
 
 ## 2. 鉴权与用户
 
-双 JWT 鉴权。access token 15 分钟短时效，refresh token 30 天长时效，每次刷新时轮换。重放检测与 `family_id` 机制见 [data-model.md](./data-model.md#8-鉴权与用户系统)。
+Cookie 认证。登录成功后，后端设置两个 httpOnly Cookie：`access_token`（JWT，15 分钟）与 `refresh_token`（不透明令牌，30 天）。前端请求需携带 `withCredentials: true`，浏览器自动附带 Cookie。刷新与登出同样通过 Cookie 传递 refresh_token，无需前端手动管理。重放检测与 `family_id` 机制见 [data-model.md](./data-model.md#8-鉴权与用户系统)。
 
 ### POST /auth/register
 
@@ -73,44 +73,31 @@ REST + SSE。所有端点前缀 `/api/v1`。请求与响应均为 JSON，除上�
 
 ```json
 {
-  "access_token": "eyJhbGci...",
-  "refresh_token": "dGhpcyBpcyBh...",
-  "expires_in": 900,
   "user": {"user_id": "a1b2...", "email": "user@example.com", "username": "zhangsan"}
 }
 ```
 
-`expires_in` 单位为秒，供前端计算自动刷新时机。凭证错误返回 401 `INVALID_CREDENTIALS`。
+认证信息通过 httpOnly Cookie 传递（`access_token` 与 `refresh_token`），响应体中不含 token。凭证错误返回 401 `INVALID_CREDENTIALS`。
 
 ### POST /auth/refresh
 
-```json
-{
-  "refresh_token": "dGhpcyBpcyBh..."
-}
-```
+无需请求体。浏览器自动携带 `refresh_token` Cookie。
 
 响应 `200`：
 
 ```json
 {
-  "access_token": "eyJhbGci...",
-  "refresh_token": "bmV3IHJlZnJl...",
-  "expires_in": 900
+  "user": {"user_id": "a1b2...", "email": "user@example.com", "username": "zhangsan"}
 }
 ```
 
-旧 refresh token 立即吊销，新 token 同 `family_id`。refresh token 已吊销/过期返回 401 `REFRESH_INVALID`；检测到重放（已吊销的 token 被再次使用）返回 401 `REFRESH_REUSE_DETECTED`，整条链全部吊销。
+后端验证 Cookie 中的 refresh_token，轮换成功后通过 httpOnly Cookie 返回新的 `access_token` 与 `refresh_token`。旧 refresh token 立即吊销，新 token 同 `family_id`。refresh token 已吊销/过期返回 401 `REFRESH_INVALID`；检测到重放（已吊销的 token 被再次使用）返回 401 `REFRESH_REUSE_DETECTED`，整条链全部吊销。
 
 ### POST /auth/logout
 
-```json
-{
-  "refresh_token": "bmV3IHJlZnJl..."
-}
-```
+无需请求体。浏览器自动携带 `refresh_token` Cookie。
 
-响应 `204`，该 refresh token 被标记 `revoked_at`，不可再用于刷新。access token 在接下来 ≤15 分钟内仍有效，不做主动失效。
+响应 `204`，后端吊销该 refresh token（标记 `revoked_at`），并清除 `access_token` 与 `refresh_token` Cookie。access token 在接下来 ≤15 分钟内仍有效，不做主动失效。
 
 ## 3. 上传
 
@@ -518,9 +505,9 @@ md 结构见 [agent-design.md](./agent-design.md#10-md-合成规范)：题卷在
 | `RATE_LIMITED` | 429 | 超出速率限制 | 按 `Retry-After` 退避 |
 | `USER_EXISTS` | 409 | 邮箱或用户名已被注册 | 提示换一个 |
 | `INVALID_CREDENTIALS` | 401 | 登录凭证错误 | 提示用户重输 |
-| `TOKEN_MISSING` | 401 | 未携带 access token | 前端中间件拦截，重定向登录 |
-| `TOKEN_EXPIRED` | 401 | access token 已过期 | 前端自动用 refresh token 续期，刷新后重放原请求 |
-| `REFRESH_INVALID` | 401 | refresh token 已吊销/过期 | 清除本地 token，引导重新登录 |
+| `TOKEN_MISSING` | 401 | 未携带有效 access token（Cookie 缺失或无效） | 前端中间件拦截，重定向登录 |
+| `TOKEN_EXPIRED` | 401 | access token 已过期 | 后端自动通过 refresh token Cookie 续期，前端无感知 |
+| `REFRESH_INVALID` | 401 | refresh token 已吊销/过期 | 清除 Cookie，引导重新登录 |
 | `REFRESH_REUSE_DETECTED` | 401 | 检测到重放（已吊销 token 被复用） | 吊销整条链，强制重新登录；提示安全问题 |
 
 `PARSE_FAILED`、`MODERATION_REJECTED` 无 HTTP 状态，因为它们只作为 `warning` 事件或 `job.warnings` 出现，不构成请求失败（FR-16、NFR-5）。`PLANNING_FAILED`、`GENERATION_EXHAUSTED` 同理，出现在 `error` 事件与 `job.error_code` 中。
@@ -530,4 +517,4 @@ md 结构见 [agent-design.md](./agent-design.md#10-md-合成规范)：题卷在
 - 时间戳统一 ISO 8601 UTC，带 `Z`
 - 所有 ID 为 UUID 字符串
 - 分页暂不需要（单用户任务量有限），将来加则用 `cursor` + `limit`
-- 鉴权采用双 JWT（见第 2 节），除 `/auth/*` 与 `GET /schools`、`GET /schools/{school_id}/courses` 外，所有端点需携带有效 access token；`/uploads`、`/jobs` 及子资源还需校验资源归属于当前用户
+- 鉴权采用 httpOnly Cookie（见第 2 节），除 `/auth/*` 与 `GET /schools`、`GET /schools/{school_id}/courses` 外，所有端点需携带有效 access token Cookie；`/uploads`、`/jobs` 及子资源还需校验资源归属于当前用户

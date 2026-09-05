@@ -48,8 +48,8 @@ idea.md → prd.md → architecture.md → data-model.md → api.md → agent-de
 | 排他类 | `exclusive` | 用户本次提供后即不再引入共享库同类内容的内容类型 |
 | 叠加类 | `additive` | 无论用户是否提供都会叠加共享库同类内容的内容类型 |
 | 换题 | replan | 某题重试耗尽后，由主 agent 更换其知识点或考察方向 |
-| 访问令牌 | `access token` | 双 JWT 中短时效（15 分钟）的 JWT，随 `Authorization: Bearer` 携带，仅存前端内存 |
-| 刷新令牌 | `refresh token` | 双 JWT 中长时效（30 天）的不透明令牌，用于换取新 access token，服务端只存哈希 |
+| 访问令牌 | `access token` | httpOnly Cookie 中短时效（15 分钟）的 JWT，浏览器自动携带，前端不存储 |
+| 刷新令牌 | `refresh token` | httpOnly Cookie 中长时效（30 天）的不透明令牌，用于后端自动轮换，服务端只存哈希 |
 | 刷新链族 | `family_id` | 一次登录后连续轮换产生的 refresh token 链，用于重放检测与整链吊销 |
 
 ### 内容类型（`source_type`）取值

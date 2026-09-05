@@ -54,7 +54,7 @@
 | Agent 编排 | LangGraph ≥ 0.2.60 |
 | LLM | OpenAI API（兼容协议，可替换后端） |
 | 文档解析 | PyMuPDF、python-docx、python-pptx、Pillow |
-| 认证 | PyJWT + bcrypt |
+| 认证 | httpOnly Cookie + JWT + bcrypt |
 | 实时推送 | SSE (sse-starlette) |
 | HTTP 客户端 | httpx |
 | 前端 | Vite + TypeScript（见 `frontend/`） |
@@ -150,7 +150,7 @@ app/
 ├── config.py                   # 配置加载（pydantic-settings）
 │
 ├── api/                        # ── 接入层 ──
-│   ├── auth.py                 # JWT 登录 / 注册 / 刷新
+│   ├── auth.py                 # Cookie 登录 / 注册 / 刷新 / 登出
 │   ├── uploads.py              # 文件上传
 │   ├── jobs.py                 # 任务创建 / 查询 / 取消
 │   ├── events.py               # SSE 进度事件
@@ -220,7 +220,7 @@ app/
 │
 ├── core/                       # 基础设施
 │   ├── db.py                   # 数据库连接 / Session
-│   ├── security.py             # 密码哈希 / JWT
+│   ├── security.py             # 密码哈希 / JWT（Cookie 认证）
 │   ├── storage.py              # 对象存储抽象
 │   ├── exceptions.py           # 业务异常 + 错误码
 │   ├── deps.py                 # FastAPI 依赖注入
@@ -242,7 +242,7 @@ frontend/                      # 前端项目（Vite + TypeScript）
 
 | 模块 | 路径前缀 | 说明 |
 |------|----------|------|
-| 认证 | `/api/v1/auth` | 注册 / 登录 / 刷新 Token |
+| 认证 | `/api/v1/auth` | 注册 / 登录 / 刷新 / 登出（Cookie 认证） |
 | 上传 | `/api/v1/uploads` | 上传课程资料文件 |
 | 任务 | `/api/v1/jobs` | 创建试卷生成任务 / 查询状态 / 取消 |
 | 产物 | `/api/v1/artifacts` | 下载 Markdown / PDF |
@@ -307,9 +307,12 @@ uv run alembic downgrade -1
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
 | `DATABASE_URL` | 数据库连接字符串 | — |
-| `JWT_SECRET` | JWT 签名密钥 | — |
+| `JWT_SECRET` | JWT 签名密钥（Cookie 中 access_token 使用） | — |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | Access Token 有效期 | 15 |
 | `REFRESH_TOKEN_EXPIRE_DAYS` | Refresh Token 有效期 | 30 |
+| `COOKIE_SECURE` | Cookie 仅 HTTPS 传输（生产环境必须设为 true） | `false` |
+| `COOKIE_SAMESITE` | Cookie SameSite 策略（`lax` / `strict` / `none`） | `lax` |
+| `COOKIE_DOMAIN` | Cookie 域名（跨子域时配置，如 `.example.com`） | `null` |
 | `STORAGE_DIR` | 产物存储目录 | `./storage` |
 | `CORS_ORIGINS` | 允许的跨域来源 | `["http://localhost:5173"]` |
 | `LLM_API_KEY` | LLM API 密钥 | — |

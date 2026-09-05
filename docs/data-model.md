@@ -28,7 +28,7 @@ CREATE TABLE app_user (
     UNIQUE (username)
 );
 
--- 会话 / 双 JWT 的 refresh token，服务端可吊销
+-- 会话 / Cookie 认证的 refresh token，服务端可吊销
 CREATE TABLE refresh_token (
     id          UUID PRIMARY KEY,
     user_id     UUID NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
@@ -57,7 +57,7 @@ CREATE TABLE course (
 );
 ```
 
-`app_user` 的 `email` 与 `username` 均可作为登录标识（二选一），密码只存哈希。鉴权设计、双 JWT 策略与 `refresh_token` 的哈希存储、`family_id` 重放检测见 [第 8 节](#8-鉴权与用户系统)。
+`app_user` 的 `email` 与 `username` 均可作为登录标识（二选一），密码只存哈希。鉴权设计、Cookie 认证策略与 `refresh_token` 的哈希存储、`family_id` 重放检测见 [第 8 节](#8-鉴权与用户系统)。
 
 课程隶属于学校，因为「高等数学」在不同学校的考察范围不同，共享库必须按 `(school_id, course_id)` 双维度隔离。
 
@@ -461,29 +461,29 @@ shared/{school_id}/{course_id}/{source_type}/
 
 ## 8. 鉴权与用户系统
 
-首版采用**双 JWT**：短时效的 access token + 长时效的 refresh token。这是面向学生的单页应用最常见的登录态方案。名词与错误码定义见 [api.md](./api.md#2-鉴权与用户)。
+首版采用**httpOnly Cookie + JWT**：登录成功后，后端设置两个 httpOnly Cookie——`access_token`（JWT，15 分钟）与 `refresh_token`（不透明令牌，30 天）。前端请求携带 `withCredentials: true`，浏览器自动附带 Cookie。名词与错误码定义见 [api.md](./api.md#2-鉴权与用户)。
 
 ### 8.1 令牌划分
 
-| 令牌 | 时效 | 用途 | 存储位置 |
+| 令牌 | 时效 | 用途 | 传输方式 |
 | --- | --- | --- | --- |
-| access token | 15 分钟 | 业务请求鉴权，随 `Authorization: Bearer` 携带 | 仅客户端内存（不持久化） |
-| refresh token | 30 天 | 换取新的 access token，同时轮换自身 | 客户端安全存储；服务端只存哈希（`refresh_token` 表） |
+| access token | 15 分钟 | 业务请求鉴权，JWT 格式 | httpOnly Cookie（浏览器自动携带） |
+| refresh token | 30 天 | 换取新的 access token，同时轮换自身 | httpOnly Cookie（浏览器自动携带） |
 
-**为什么 refresh token 落库**：双 JWT 的代价是——access token 无状态、失效前无法吊销；refresh token 若不落库，泄露后也无法吊销。把 refresh token 的哈希落库（只存 SHA-256，不存明文），就获得了「随时吊销」「登出即失效」「检测重放」的能力。
+**为什么 refresh token 落库**：Cookie 中携带 refresh token 的代价与 Bearer token 相同——access token 无状态、失效前无法吊销；refresh token 若不落库，泄露后也无法吊销。把 refresh token 的哈希落库（只存 SHA-256，不存明文），就获得了「随时吊销」「登出即失效」「检测重放」的能力。
 
 ### 8.2 刷新链族（reuse detection）
 
 `refresh_token.family_id` 把一次登录后连续轮换产生的 refresh token 串成一条链。轮换规则：
 
-- 用 `token` 调 `/auth/refresh` 成功后：旧 token 立即标记 `revoked_at`，签发同 `family_id` 的新 token
+- 用 `refresh_token` Cookie 调 `/auth/refresh` 成功后：旧 token 立即标记 `revoked_at`，签发同 `family_id` 的新 token，并通过 Cookie 返回
 - 若系统发现一个**已被吊销**的 token 再次被用于刷新，判定为泄露重放，**整条链（同 `family_id`）全部吊销**，该用户所有会话作废
 
 这条规则对应 [api.md](./api.md#2-鉴权与用户) 的 `REFRESH_REUSE_DETECTED` 错误码。代价是用户多端登录时，若两端共用同一 refresh token 并发刷新会互相吊销——首版接受此限制，不额外支持多设备独立会话。
 
 ### 8.3 资源归属与鉴权
 
-- 除 `/auth/*` 与 `GET /schools`、`GET /schools/{id}/courses` 外，所有端点均要求有效 access token
+- 除 `/auth/*` 与 `GET /schools`、`GET /schools/{id}/courses` 外，所有端点均要求有效 access token（通过 Cookie 传递）
 - `/uploads`、`/jobs` 及子资源在读写时校验资源归属于当前用户（`user_id`），越权一律按 404 处理（不泄露资源是否存在）
 - `source_type` 的共享与向量库跨用户隔离沿用第 4 节的规则，`user_id` 来自鉴权后的当前用户
 

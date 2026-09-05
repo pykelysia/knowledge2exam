@@ -153,20 +153,20 @@ md 渲染为 PDF 返回给用户。中文正常显示，LaTeX 公式正确渲染
 
 验收：用已存在的邮箱或用户名注册返回 409 `USER_EXISTS`；成功注册后返回该用户信息。
 
-**FR-22 登录与双令牌**
-用户登录成功获得 access token 与 refresh token 各一枚。access token 短时效（15 分钟），refresh token 长时效（30 天）。
+**FR-22 登录与 Cookie 认证**
+用户登录成功获得 httpOnly Cookie：`access_token`（JWT，15 分钟）与 `refresh_token`（不透明令牌，30 天）。前端请求携带 `withCredentials: true`，浏览器自动附带 Cookie。
 
-验收：登录成功返回两个 token 及用户信息；access token 过期后调用业务接口返回 401 `TOKEN_EXPIRED`。
+验收：登录成功返回用户信息；响应头中 Set-Cookie 包含两个 httpOnly Cookie；前端请求不携带 Authorization 头。
 
 **FR-23 刷新与轮换**
-用 refresh token 换取新 access token 时，同步轮换 refresh token（旧 refresh token 立即失效，签发同族新 token）。
+Access token 过期时，后端自动使用 Cookie 中的 refresh_token 进行轮换（旧 refresh_token 立即失效，签发同族新 token），通过 Set-Cookie 返回新 token。
 
-验收：刷新成功后旧 refresh token 不可再用；连续刷新得到同 `family_id` 的新 token。
+验收：access token 过期后调用业务接口，后端透明续期，用户无感知；连续刷新得到同 `family_id` 的新 token。
 
 **FR-24 登出**
-用户登出时吊销其 refresh token，此后该 refresh token 无法再用于刷新。
+用户登出时，后端吊销其 refresh token 并清除 `access_token` 与 `refresh_token` Cookie，此后该 refresh token 无法再用于刷新。
 
-验收：登出后调用 `/auth/refresh` 返回 401 `REFRESH_INVALID`。
+验收：登出后 Cookie 被清除；调用 `/auth/refresh` 返回 401 `REFRESH_INVALID`。
 
 **FR-25 资源归属鉴权**
 所有上传件与任务资源在读写时校验归属于当前用户，越权访问按 404 处理（不泄露资源是否存在）。
@@ -196,8 +196,8 @@ md 渲染为 PDF 返回给用户。中文正常显示，LaTeX 公式正确渲染
 **NFR-7 数据留存与删除**
 用户可删除自己的任务及其产物。已共享并通过检测的资源不随个人任务删除而消失，因为它已进入公共知识库。此规则需在用户共享时明确告知。
 
-**NFR-8 双 JWT 安全策略**
-access token 15 分钟、前端内存不落地；refresh token 30 天、服务端仅存 SHA-256 哈希；refresh token 每次刷新时轮换，检测到重放则吊销整条链（`family_id`）的全部 token。设计见 [data-model.md](./data-model.md#8-鉴权与用户系统)。
+**NFR-8 Cookie 安全策略**
+access token 15 分钟、前端内存不落地；refresh token 30 天、服务端仅存 SHA-256 哈希；refresh token 每次刷新时轮换，检测到重放则吊销整条链（`family_id`）的全部 token。Cookie 属性为 httpOnly、Secure（生产环境）、SameSite=Lax。设计见 [data-model.md](./data-model.md#8-鉴权与用户系统)。
 
 ## 5. 用户流程
 
@@ -214,8 +214,8 @@ sequenceDiagram
     B-->>F: 201 用户信息
     U->>F: 输入凭证
     F->>B: POST /auth/login
-    B-->>F: access_token + refresh_token
-    Note over F: access token 存内存，refresh token 存安全存储
+    B-->>F: Set-Cookie: access_token + refresh_token
+    Note over F: Cookie 由浏览器自动管理，前端不存储 token
 ```
 
 ### 5.2 主流程
@@ -227,13 +227,13 @@ sequenceDiagram
     participant B as 后端
 
     U->>F: 选择文件并标注内容类型
-    F->>B: POST /uploads（逐个文件，带 Bearer）
+    F->>B: POST /uploads（逐个文件，带 Cookie）
     B-->>F: upload_id + 解析预览
     U->>F: 勾选共享项、选学校课程
     U->>F: 设置时长 / 解析开关 / 审查开关
-    F->>B: POST /jobs（带 Bearer）
+    F->>B: POST /jobs（带 Cookie）
     B-->>F: 202 job_id
-    F->>B: GET /jobs/{id}/events（SSE）
+    F->>B: GET /jobs/{id}/events（SSE，带 Cookie）
     B-->>F: stage_changed: preprocessing
     B-->>F: stage_changed: planning
     B-->>F: plan_ready（总题量与题型分布）
@@ -241,19 +241,19 @@ sequenceDiagram
     B-->>F: stage_changed: rendering
     B-->>F: done
     U->>F: 下载 PDF
-    F->>B: GET /jobs/{id}/paper.pdf
+    F->>B: GET /jobs/{id}/paper.pdf（带 Cookie）
 ```
 
-### 5.3 令牌刷新
+### 5.3 Cookie 刷新
 
 ```mermaid
 sequenceDiagram
     participant F as 前端
     participant B as 后端
 
-    F->>B: POST /auth/refresh（带 refresh token）
-    B-->>F: 新 access_token + 新 refresh_token（旧 refresh 作废）
-    Note over F: access token 过期时由前端拦截 401 自动触发，透明续期
+    F->>B: POST /auth/refresh（带 Cookie）
+    B-->>F: Set-Cookie: 新 access_token + 新 refresh_token（旧 refresh 作废）
+    Note over F: Cookie 由浏览器自动更新，用户无感知
 ```
 
 ### 5.4 异常流程
@@ -293,7 +293,7 @@ md 已生成但 PDF 渲染失败 → 任务转 `partially_completed` → md 仍�
 | 选择共享但未选学校课程 | 400，共享必须有归属 |
 | 时长设置过短（如 5 分钟） | 允许，题量相应减少，但至少 1 题 |
 | 未登录调用受保护端点 | 401 `TOKEN_MISSING` |
-| access token 过期 | 401 `TOKEN_EXPIRED`，前端拦截后用 refresh token 透明续期 |
+| access token 过期 | 401 `TOKEN_EXPIRED`，后端透明续期 |
 | refresh token 已吊销/失效 | 401 `REFRESH_INVALID`，引导重新登录 |
 | refresh token 重放（复用已吊销的 token） | 401 `REFRESH_REUSE_DETECTED`，吊销整条链，重新登录 |
 | 访问他人资源 | 404，不泄露资源是否存在 |

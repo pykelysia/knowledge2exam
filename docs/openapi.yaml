@@ -14,8 +14,7 @@ info:
 servers:
   - url: /api/v1
     description: 相对路径（同源部署，经反向代理去掉前缀）
-security:
-  - bearerAuth: []
+security: []
 tags:
   - name: Auth
     description: 注册、登录、刷新与登出（FR-21~FR-24）
@@ -51,7 +50,7 @@ paths:
     post:
       tags: [Auth]
       operationId: login
-      summary: 登录，返回双 token
+      summary: 登录，设置 httpOnly Cookie
       security: []
       requestBody:
         required: true
@@ -61,46 +60,34 @@ paths:
               $ref: '#/components/schemas/LoginRequest'
       responses:
         '200':
-          description: 登录成功，返回 access + refresh 双 token
+          description: 登录成功，返回用户信息；认证信息通过 httpOnly Cookie 传递
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AuthTokens'
+                $ref: '#/components/schemas/UserResponse'
         '401':
           $ref: '#/components/responses/InvalidCredentials'
   /auth/refresh:
     post:
       tags: [Auth]
       operationId: refresh
-      summary: 刷新 access token 并轮换 refresh token
+      summary: 刷新 access token 并轮换 refresh token（通过 Cookie）
       security: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/RefreshRequest'
       responses:
         '200':
-          description: 刷新成功
+          description: 刷新成功，返回用户信息；新认证信息通过 httpOnly Cookie 传递
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AuthTokens'
+                $ref: '#/components/schemas/UserResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
   /auth/logout:
     post:
       tags: [Auth]
       operationId: logout
-      summary: 登出，吊销 refresh token
+      summary: 登出，清除 Cookie 并吊销 refresh token
       security: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/LogoutRequest'
       responses:
         '204':
           description: 已登出
@@ -347,11 +334,14 @@ paths:
           $ref: '#/components/responses/NotFound'
 components:
   securitySchemes:
-    bearerAuth:
-      type: http
-      scheme: bearer
-      bearerFormat: JWT
-      description: access token（双 JWT 中的短时效令牌，15 分钟）。refresh token 不用于此，仅在 /auth/refresh 与 /auth/logout 的请求体中出现。
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: access_token
+      description: |
+        Cookie 认证。登录成功后，后端设置 httpOnly Cookie `access_token`（JWT，15 分钟）与
+        `refresh_token`（不透明令牌，30 天）。前端请求需携带 `withCredentials: true`，
+        浏览器会自动附带 Cookie。刷新与登出同样通过 Cookie 传递 refresh_token。
   parameters:
     UploadId:
       name: upload_id
@@ -459,18 +449,6 @@ components:
           nullable: true
         password:
           type: string
-    RefreshRequest:
-      type: object
-      required: [refresh_token]
-      properties:
-        refresh_token:
-          type: string
-    LogoutRequest:
-      type: object
-      required: [refresh_token]
-      properties:
-        refresh_token:
-          type: string
     User:
       type: object
       required: [user_id, email, username]
@@ -487,21 +465,6 @@ components:
       type: object
       required: [user]
       properties:
-        user:
-          $ref: '#/components/schemas/User'
-    AuthTokens:
-      type: object
-      required: [access_token, refresh_token, expires_in]
-      properties:
-        access_token:
-          type: string
-          description: JWT，15 分钟时效
-        refresh_token:
-          type: string
-          description: 不透明令牌，30 天时效，服务端存 SHA-256 哈希
-        expires_in:
-          type: integer
-          description: access token 有效期（秒）
         user:
           $ref: '#/components/schemas/User'
     SourceTypeFile:
