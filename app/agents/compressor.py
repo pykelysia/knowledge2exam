@@ -26,4 +26,4 @@ async def compress_text(
         max_tokens=target_tokens,
     )
 
-    return response.choices[0].message.content or raw_text
+    return response.content or raw_text

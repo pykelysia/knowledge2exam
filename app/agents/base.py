@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 
@@ -21,3 +22,12 @@ class StubAgent:
 
     async def run(self, **kwargs: Any) -> Any:
         return kwargs
+
+
+@dataclass
+class SubAgentResult:
+    """SubAgent 执行结果。"""
+
+    status: str  # "success" | "failed" | "needs_replan"
+    error: str | None = None
+    replan_requests: list[dict[str, Any]] = field(default_factory=list)
