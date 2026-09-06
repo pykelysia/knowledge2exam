@@ -1,8 +1,7 @@
 """编排层入口。
 
-真实实现：直接编排各阶段（planner -> fan-out -> reviewer -> rendering）。
-LangGraph 编排图见 graph.py（首版保留为可选入口，因 MemorySaver 在
-BackgroundTasks 多任务并发下存在 checkpoint 冲突，直接流程更稳定）。
+真实实现：基于 LangGraph 的 MainAgent 主从式架构（见 app/agents/main_agent.py）。
+MainAgent 调度 SubAgent（Planner/Writer/Reviewer）完成出题任务。
 Fallback：若 LLM 配置缺失或真实流程失败，回退到模拟 pipeline。
 """
 
@@ -16,8 +15,9 @@ from typing import Any
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.planner import run_planner
-from app.agents.reviewer import run_reviewer
+from app.agents.main_agent import run_main_agent
+from app.core.events import EventBus, has_subscribers, subscribe, unsubscribe
+from app.orchestration.integration import integrate_subagent_results
 from app.config import settings
 from app.core.db import AsyncSessionLocal
 from app.core.exceptions import ErrorCode
@@ -28,10 +28,9 @@ from app.ingestion.parsers import get_parser
 from app.ingestion.postprocess import build_merged_text, process_images
 from app.models.job import Job, JobUpload
 from app.models.plan import PlanItem
-from app.models.question import Question, RetryLog
+from app.models.question import Question
 from app.models.upload import Upload
 from app.orchestration.events import EventBus
-from app.orchestration.fanout import run_fanout
 from app.orchestration.state_machine import JobStatus, Stage
 from app.rendering.markdown import build_markdown
 from app.rendering.renderer import _get_renderer
@@ -39,9 +38,6 @@ from app.retrieval.past_papers import past_paper_cache
 from app.retrieval.vector_store import PgVectorStore
 
 from app.core.debug_log import log_error, log_step
-
-MAX_QUESTION_RETRY = 3
-MAX_REVIEW_CYCLES = 5
 
 
 async def _get_job_upload_ids(db: AsyncSession, job_id: uuid.UUID) -> list[uuid.UUID]:
@@ -68,27 +64,6 @@ async def _check_cancelled(db: AsyncSession, job_id: uuid.UUID, bus: EventBus) -
         await db.commit()
         return True
     return False
-
-
-def _write_retry_log(
-    db: AsyncSession,
-    question_id: uuid.UUID | None,
-    plan_item_id: uuid.UUID,
-    attempt: int,
-    reason: str,
-    counted: bool,
-    detail: dict[str, Any] | None = None,
-) -> None:
-    """写入一条 retry_log 记录。"""
-    log = RetryLog(
-        question_id=question_id,
-        plan_item_id=plan_item_id,
-        attempt=attempt,
-        reason=reason,
-        counted=counted,
-        detail=detail,
-    )
-    db.add(log)
 
 
 async def run_pipeline(job_id: uuid.UUID) -> None:
@@ -120,6 +95,28 @@ async def run_pipeline(job_id: uuid.UUID) -> None:
                 context={"has_llm": has_llm},
             )
             raise
+
+
+async def _run_pipeline_with_cancellation(job_id: uuid.UUID) -> None:
+    """包装 run_pipeline，处理任务注册和取消。"""
+    try:
+        await run_pipeline(job_id)
+    except asyncio.CancelledError:
+        # 任务被取消：更新数据库状态并通知订阅者
+        async with AsyncSessionLocal() as db:
+            job = await db.get(Job, job_id)
+            if job and job.status != JobStatus.cancelled.value:
+                job.status = JobStatus.cancelled.value
+                job.finished_at = datetime.now(UTC)
+                await db.commit()
+                bus = EventBus(db)
+                await bus.emit_and_close(
+                    job_id,
+                    "done",
+                    {"status": JobStatus.cancelled.value},
+                )
+                await db.commit()
+        raise
 
 
 async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
@@ -178,80 +175,59 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
     )
     await db.commit()
 
-    plan_items = await run_planner(
-        db=db,
+    # ---------- main agent (planning + generating + reviewing) ----------
+    if await _check_cancelled(db, job.id, bus):
+        return
+
+    main_agent_context = {
+        "duration_minutes": job.duration_minutes,
+        "past_papers_full_text_or_none": context.get("past_papers_full_text_or_none"),
+        "keypoint_list_or_none": context.get("keypoint_list_or_none"),
+        "extra_requirement_or_none": context.get("extra_requirement_or_none"),
+        "shared_library_summary": context.get("shared_library_summary"),
+        "need_explanation": job.need_explanation,
+        "enable_review": job.enable_review,
+        "review_mode": "full" if job.enable_review else "format",
+        "max_retries": getattr(settings, "subagent_max_retries", 3),
+        "max_concurrent_writers": getattr(settings, "max_concurrent_writers", 4),
+        "reference_used": "shared_library",
+    }
+
+    main_result = await run_main_agent(
         job_id=job.id,
-        bus=bus,
-        context={
-            "duration_minutes": job.duration_minutes,
-            "past_papers_full_text_or_none": context.get("past_papers_full_text_or_none"),
-            "keypoint_list_or_none": context.get("keypoint_list_or_none"),
-            "extra_requirement_or_none": context.get("extra_requirement_or_none"),
-            "shared_library_summary": context.get("shared_library_summary"),
-            "planner_model": getattr(settings, "planner_model", "gpt-4o"),
-            "reference_used": "shared_library",
+        context=main_agent_context,
+    )
+
+    # 整合 subagent 结果到数据库
+    integration_result = await integrate_subagent_results(db, job.id)
+
+    # 从数据库加载 plan_items 以计算分布
+    all_plan_items = (
+        await db.scalars(
+            select(PlanItem).where(
+                PlanItem.job_id == job.id,
+                PlanItem.superseded_by.is_(None),
+            )
+        )
+    ).all()
+    distribution: dict[str, int] = {}
+    for p in all_plan_items:
+        distribution[p.question_type] = distribution.get(p.question_type, 0) + 1
+
+    await log_step(
+        job_id=str(job.id),
+        name="run_main_agent",
+        stage=Stage.planning.value,
+        input={"context_keys": list(main_agent_context.keys())},
+        output={
+            "main_result": main_result,
+            "integration": integration_result,
+            "distribution": distribution,
         },
     )
 
-    await log_step(
-        job_id=str(job.id),
-        name="run_planner",
-        stage=Stage.planning.value,
-        input={"model": getattr(settings, "planner_model", "gpt-4o")},
-        output={"plan_items": len(plan_items)},
-    )
-
-    job.planned_total = len(plan_items)
+    job.planned_total = integration_result.get("total_questions", 0)
     await db.commit()
-
-    # ---------- generating (fan-out) ----------
-    if await _check_cancelled(db, job.id, bus):
-        return
-    job.status = JobStatus.generating.value
-    await bus.emit(
-        job.id, "stage_changed",
-        {"stage": Stage.generating.value, "previous": Stage.planning.value},
-        stage=Stage.generating.value,
-    )
-    await db.commit()
-
-    await run_fanout(
-        db=db,
-        job_id=job.id,
-        bus=bus,
-        plan_items=plan_items,
-        need_explanation=job.need_explanation,
-        writer_model=getattr(settings, "writer_model", "gpt-4o-mini"),
-        knowledge_context="",
-        max_concurrent=getattr(settings, "max_concurrent_writers", 4),
-    )
-
-    distribution: dict[str, int] = {}
-    for p in plan_items:
-        distribution[p.question_type] = distribution.get(p.question_type, 0) + 1
-    await log_step(
-        job_id=str(job.id),
-        name="run_fanout",
-        stage=Stage.generating.value,
-        input={"plan_count": len(plan_items), "max_concurrent": getattr(settings, "max_concurrent_writers", 4)},
-        output={"distribution": distribution},
-    )
-
-    # ---------- reviewing (with retry loop) ----------
-    if job.enable_review:
-        if await _check_cancelled(db, job.id, bus):
-            return
-        await _run_review_with_retry(
-            db=db,
-            job=job,
-            bus=bus,
-            plan_items=plan_items,
-            need_explanation=job.need_explanation,
-            reviewer_model=getattr(settings, "reviewer_model", "gpt-4o"),
-            writer_model=getattr(settings, "writer_model", "gpt-4o-mini"),
-            max_concurrent=getattr(settings, "max_concurrent_writers", 4),
-            context=context,
-        )
 
     # ---------- rendering ----------
     if await _check_cancelled(db, job.id, bus):
@@ -357,322 +333,6 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
         },
         stage=Stage.rendering.value,
     )
-    await db.commit()
-
-
-async def _run_review_with_retry(
-    db: AsyncSession,
-    job: Job,
-    bus: EventBus,
-    plan_items: list[PlanItem],
-    need_explanation: bool,
-    reviewer_model: str,
-    writer_model: str,
-    max_concurrent: int,
-    context: dict[str, Any] | None = None,
-) -> None:
-    """执行 reviewer，对打回的题目进入重试/换题循环。"""
-
-    plan_map = {p.seq: p for p in plan_items}
-
-    # 加载已有题目
-    q_rows = (
-        await db.scalars(
-            select(Question).where(Question.job_id == job.id).order_by(Question.seq)
-        )
-    ).all()
-    questions = list(q_rows)
-
-    for cycle in range(MAX_REVIEW_CYCLES):
-        # 执行 reviewer
-        job.status = JobStatus.reviewing.value
-        await bus.emit(
-            job.id, "stage_changed",
-            {"stage": Stage.reviewing.value, "previous": Stage.generating.value},
-            stage=Stage.reviewing.value,
-        )
-        await db.commit()
-
-        await run_reviewer(
-            db=db,
-            job_id=job.id,
-            bus=bus,
-            questions=questions,
-            plan_items_map=plan_map,
-            model=reviewer_model,
-        )
-
-        import time
-
-        review_elapsed = 0  # 可通过 reviewer 返回值补充
-        rejected_qs = [q for q in questions if q.review_passed is False]
-        await log_step(
-            job_id=str(job.id),
-            name="run_reviewer",
-            stage=Stage.reviewing.value,
-            input={"model": reviewer_model, "question_count": len(questions), "cycle": cycle + 1},
-            output={"passed": len(questions) - len(rejected_qs), "rejected": len(rejected_qs)},
-            elapsed_ms=review_elapsed,
-        )
-        if not rejected_qs:
-            break
-
-        # 分类：可重试 vs 需废弃
-        to_retry: list[Question] = []
-        to_abandon: list[Question] = []
-
-        for q in rejected_qs:
-            if q.retry_count < MAX_QUESTION_RETRY:
-                to_retry.append(q)
-            else:
-                to_abandon.append(q)
-
-        # 处理废弃题目：标记 + emit question_replanned
-        replacement_requests: list[dict[str, Any]] = []
-        for q in to_abandon:
-            q.status = "abandoned"
-            _write_retry_log(
-                db, q.id, q.plan_item_id, q.retry_count + 1,
-                "retry_exhausted", True,
-                {"action": "abandon", "review_cycle": cycle},
-            )
-            await bus.emit(
-                job.id, "question_replanned",
-                {
-                    "question_id": str(q.id),
-                    "plan_item_id": str(q.plan_item_id),
-                    "seq": q.seq,
-                    "retry_count": q.retry_count,
-                },
-            )
-
-            # 收集换题请求信息
-            old_plan = plan_map.get(q.seq)
-            if old_plan:
-                replacement_requests.append({
-                    "seq": q.seq,
-                    "question_type": q.question_type,
-                    "knowledge_point": old_plan.knowledge_point,
-                    "exam_direction": old_plan.exam_direction,
-                    "difficulty": old_plan.difficulty,
-                    "failure_reason": "retry_exhausted",
-                    "retry_count": q.retry_count,
-                })
-
-        # 如果有换题请求，调用 planner 生成替换方案
-        new_plan_items: list[PlanItem] = []
-        if replacement_requests and context:
-            try:
-                # 构建当前试卷的 plan_items 列表（仅包含未被 superseded 的）
-                current_plans = [p for p in plan_items if p.superseded_by is None]
-                new_plan_items = await run_planner(
-                    db=db,
-                    job_id=job.id,
-                    bus=bus,
-                    context={
-                        "duration_minutes": job.duration_minutes,
-                        "past_papers_full_text_or_none": context.get("past_papers_full_text_or_none"),
-                        "keypoint_list_or_none": context.get("keypoint_list_or_none"),
-                        "extra_requirement_or_none": context.get("extra_requirement_or_none"),
-                        "shared_library_summary": context.get("shared_library_summary"),
-                        "planner_model": getattr(settings, "planner_model", "gpt-4o"),
-                        "reference_used": "shared_library",
-                        "mode": "replacement",
-                        "replacement_requests": replacement_requests,
-                        "current_plan_items": [
-                            {
-                                "seq": p.seq,
-                                "question_type": p.question_type,
-                                "knowledge_point": p.knowledge_point,
-                                "exam_direction": p.exam_direction,
-                            }
-                            for p in current_plans
-                        ],
-                    },
-                )
-            except Exception as exc:
-                await log_error(
-                    job_id=str(job.id),
-                    exc=exc,
-                    stage=Stage.reviewing.value,
-                    context={
-                        "cycle": cycle + 1,
-                        "mode": "replacement",
-                        "planner_model": getattr(settings, "planner_model", "gpt-4o"),
-                    },
-                )
-                new_plan_items = []
-
-        # 为换题题目创建新 plan_item 并生成题目
-        for new_plan in new_plan_items:
-            old_plan = plan_map.get(new_plan.seq)
-            if old_plan:
-                old_plan.superseded_by = new_plan.id
-                db.add(new_plan)
-                await db.flush()
-
-                # 为新 plan_item 生成题目（retry_count 重置为 0）
-                try:
-                    knowledge_context = await _retrieve_knowledge_for_plan(db, job.id, new_plan)
-                    new_q = await generate_single_question(
-                        db=db,
-                        job_id=job.id,
-                        plan_item=new_plan,
-                        need_explanation=need_explanation,
-                        model=writer_model,
-                        knowledge_context=knowledge_context,
-                        retry_count=0,
-                    )
-                    new_q.replanned_from = old_plan.id
-                    if bus:
-                        await bus.emit(
-                            job.id, "question_completed",
-                            {"seq": new_q.seq, "question_type": new_q.question_type,
-                             "completed": 1, "total": 1},
-                            stage=None,
-                        )
-                        await db.commit()
-                except Exception as exc:
-                    await log_error(
-                        job_id=str(job.id),
-                        exc=exc,
-                        stage=Stage.reviewing.value,
-                        context={
-                            "cycle": cycle + 1,
-                            "mode": "new_plan_generation",
-                            "plan_seq": new_plan.seq,
-                            "writer_model": writer_model,
-                        },
-                    )
-                    _write_retry_log(
-                        db, None, new_plan.id, 0,
-                        "generation_failed", False,
-                        {"error": str(exc), "model": writer_model},
-                    )
-                    await db.commit()
-
-        # 对于 planner 未覆盖的废弃题目，回退到直接复制逻辑
-        covered_seqs = {p.seq for p in new_plan_items}
-        for q in to_abandon:
-            if q.seq not in covered_seqs:
-                old_plan = plan_map.get(q.seq)
-                if old_plan:
-                    # 直接复制旧 plan_item 并生成新题
-                    fallback_plan = PlanItem(
-                        job_id=job.id,
-                        seq=old_plan.seq,
-                        question_type=old_plan.question_type,
-                        knowledge_point=old_plan.knowledge_point,
-                        exam_direction=old_plan.exam_direction,
-                        difficulty=old_plan.difficulty,
-                        reference_source=old_plan.reference_source,
-                    )
-                    db.add(fallback_plan)
-                    await db.flush()
-                    old_plan.superseded_by = fallback_plan.id
-
-                    try:
-                        knowledge_context = await _retrieve_knowledge_for_plan(db, job.id, fallback_plan)
-                        new_q = await generate_single_question(
-                            db=db,
-                            job_id=job.id,
-                            plan_item=fallback_plan,
-                            need_explanation=need_explanation,
-                            model=writer_model,
-                            knowledge_context=knowledge_context,
-                            retry_count=0,
-                        )
-                        new_q.replanned_from = old_plan.id
-                        if bus:
-                            await bus.emit(
-                                job.id, "question_completed",
-                                {"seq": new_q.seq, "question_type": new_q.question_type,
-                                 "completed": 1, "total": 1},
-                                stage=None,
-                            )
-                            await db.commit()
-                    except Exception as exc:
-                        await log_error(
-                            job_id=str(job.id),
-                            exc=exc,
-                            stage=Stage.reviewing.value,
-                            context={
-                                "cycle": cycle + 1,
-                                "mode": "fallback_generation",
-                                "plan_seq": fallback_plan.seq,
-                                "writer_model": writer_model,
-                            },
-                        )
-                        _write_retry_log(
-                            db, None, fallback_plan.id, 0,
-                            "generation_failed", False,
-                            {"error": str(exc), "model": writer_model},
-                        )
-                        await db.commit()
-
-        if not to_retry:
-            # 所有打回题目均已废弃，无更多重试
-            await db.commit()
-            break
-
-        # 删除旧题目，准备重试
-        retry_plan_items: list[PlanItem] = []
-        retry_count_map: dict[uuid.UUID, int] = {}
-        for q in to_retry:
-            plan_item = plan_map.get(q.seq)
-            if plan_item:
-                retry_plan_items.append(plan_item)
-                retry_count_map[plan_item.id] = q.retry_count + 1
-
-            _write_retry_log(
-                db, q.id, q.plan_item_id, q.retry_count + 1,
-                "reviewer_rejected", True,
-                {"old_status": q.status, "review_cycle": cycle},
-            )
-            await db.delete(q)
-
-        await db.flush()
-
-        # 重新 fanout 仅包含打回的题目
-        await run_fanout(
-            db=db,
-            job_id=job.id,
-            bus=bus,
-            plan_items=retry_plan_items,
-            need_explanation=need_explanation,
-            writer_model=writer_model,
-            knowledge_context="",
-            max_concurrent=max_concurrent,
-            retry_count_map=retry_count_map,
-        )
-
-        # 刷新题目列表，进入下一轮 reviewer
-        q_rows = (
-            await db.scalars(
-                select(Question).where(Question.job_id == job.id).order_by(Question.seq)
-            )
-        ).all()
-        questions = list(q_rows)
-
-        # 更新 plan_map（仅保留未被 superseded 的 plan_item）
-        all_plan_items = (
-            await db.scalars(
-                select(PlanItem).where(
-                    PlanItem.job_id == job.id,
-                    PlanItem.superseded_by.is_(None),
-                )
-            )
-        ).all()
-        plan_map = {p.seq: p for p in all_plan_items}
-
-    # 更新 planned_total 为有效题目数
-    active_count = await db.scalar(
-        select(func.count()).where(
-            Question.job_id == job.id,
-            Question.status != "abandoned",
-        )
-    )
-    job.planned_total = active_count or 0
     await db.commit()
 
 
