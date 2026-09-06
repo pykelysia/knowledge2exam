@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import base64
 
+from langchain_core.messages import HumanMessage
+from langchain_openai import ChatOpenAI
+
 from app.config import settings
 
 
@@ -26,44 +29,41 @@ class VisionLLMOCR:
 
     async def extract_text(self, image_bytes: bytes) -> str:
         """调用视觉 LLM 提取图片中的文本。"""
-        try:
-            from openai import AsyncOpenAI
-        except ImportError as exc:
-            raise RuntimeError("openai 未安装，请运行 `pip install openai`") from exc
-
-        client = AsyncOpenAI(api_key=self._api_key, base_url=self._base_url)
+        client = ChatOpenAI(
+            model=self._model,
+            api_key=self._api_key,
+            base_url=self._base_url,
+        )
 
         # 将图片转为 base64
         image_b64 = base64.b64encode(image_bytes).decode("utf-8")
 
-        # 构造多模态请求
-        response = await client.chat.completions.create(
-            model=self._model,
-            messages=[
+        # 构造多模态消息
+        message = HumanMessage(
+            content=[
                 {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                "请提取这张图片中的所有文字内容。"
-                                "只返回提取的文字，不要添加任何解释或说明。"
-                                "如果图片中没有文字，返回空字符串。"
-                            ),
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{image_b64}",
-                                "detail": "high",
-                            },
-                        },
-                    ],
-                }
-            ],
+                    "type": "text",
+                    "text": (
+                        "请提取这张图片中的所有文字内容。"
+                        "只返回提取的文字，不要添加任何解释或说明。"
+                        "如果图片中没有文字，返回空字符串。"
+                    ),
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{image_b64}",
+                        "detail": "high",
+                    },
+                },
+            ]
+        )
+
+        response = await client.ainvoke(
+            [message],
             max_tokens=4096,
             temperature=0.0,
         )
 
-        text = response.choices[0].message.content or ""
-        return text.strip()
+        return response.content.strip() if response.content else ""
+
