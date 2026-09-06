@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,6 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.db import get_db
 from app.core.deps import get_current_user
 from app.core.events import EventBus, subscribe, unsubscribe
+from app.core.task_registry import cancel as cancel_task
+from app.core.task_registry import register
 from app.core.exceptions import (
     AppException,
     ErrorCode,
@@ -25,7 +29,7 @@ from app.models.job import Job, JobStage, JobUpload
 from app.models.question import Question
 from app.models.upload import Upload
 from app.models.user import AppUser
-from app.orchestration.stages import run_pipeline
+from app.orchestration.stages import _run_pipeline_with_cancellation, run_pipeline
 from app.orchestration.state_machine import JobStatus, Stage, is_terminal
 from app.schemas.job import (
     JobAccepted,
@@ -83,7 +87,6 @@ async def _get_owned_job(db: AsyncSession, job_id: uuid.UUID, user: AppUser) -> 
 @router.post("/jobs", response_model=JobAccepted, status_code=202)
 async def create_job(
     payload: JobCreate,
-    background_tasks: BackgroundTasks,
     user: AppUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> JobAccepted:
@@ -129,7 +132,8 @@ async def create_job(
     await db.commit()
     await db.refresh(job)
 
-    background_tasks.add_task(run_pipeline, job.id)
+    # 使用 asyncio 任务启动 pipeline，以便后续可以取消
+    register(job.id, _run_pipeline_with_cancellation(job.id))
 
     return JobAccepted(job_id=job.id, status=JobStatus.pending, created_at=job.created_at)
 
@@ -178,6 +182,8 @@ async def stream_job_events(
                     break
                 try:
                     evt = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    if evt.get("__close__"):
+                        break
                     yield _sse_frame(evt["seq"], evt["event"], evt["data"])
                 except TimeoutError:
                     yield ": keep-alive\n\n"
@@ -248,6 +254,9 @@ async def cancel_job(
     job.status = JobStatus.cancelled.value
     job.finished_at = datetime.now(UTC)
     await db.commit()
+
+    # 尝试取消正在运行的任务进程
+    cancel_task(job_id)
 
     bus = EventBus(db)
     await bus.emit_and_close(job_id, "done", {"status": JobStatus.cancelled.value})
