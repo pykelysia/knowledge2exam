@@ -13,6 +13,8 @@ _TEMPLATE_FILES: dict[str, str] = {
     "planner": "planner.md",
     "writers": "writers.md",
     "reviewer": "reviewer.md",
+    "reviewer_full": "reviewer_full.md",
+    "reviewer_format": "reviewer_format.md",
     "compressor": "compressor.md",
 }
 
