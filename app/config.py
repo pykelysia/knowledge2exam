@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://localhost/knowledge2exam"
 
     # 双 JWT
-    jwt_secret: str = "dev-only-change-me-in-production"
+    jwt_secret: str = "dev-secret-key-change-me-in-production-1234567890"
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 30
@@ -50,10 +50,18 @@ class Settings(BaseSettings):
     # LLM（OpenAI 兼容协议）
     llm_api_key: str = ""
     llm_base_url: str = "http://localhost:8000/v1"
-    planner_model: str = "gpt-4o"
-    writer_model: str = "gpt-4o-mini"
-    reviewer_model: str = "gpt-4o"
-    compressor_model: str = "gpt-4o-mini"
+
+    # MainAgent 配置
+    main_agent_model: str = "gpt-4o"
+
+    # SubAgent 配置（为空时默认使用 MainAgent 配置）
+    planner_model: str = ""  # 空则使用 main_agent_model
+    writer_model: str = ""   # 空则使用 main_agent_model
+    reviewer_model: str = "" # 空则使用 main_agent_model
+    compressor_model: str = "" # 空则使用 main_agent_model
+
+    # SubAgent 重试配置
+    subagent_max_retries: int = 3
     max_concurrent_writers: int = 4
 
     # 嵌入模型（OpenAI 兼容 embeddings 协议）
@@ -86,3 +94,21 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
+
+
+def get_agent_model(role: str) -> str:
+    """获取 agent 模型，SubAgent 配置为空时回退到 MainAgent 配置。
+
+    Args:
+        role: agent 角色，可选值：planner, writer, reviewer, compressor
+
+    Returns:
+        模型名称
+    """
+    model_map = {
+        "planner": settings.planner_model or settings.main_agent_model,
+        "writer": settings.writer_model or settings.main_agent_model,
+        "reviewer": settings.reviewer_model or settings.main_agent_model,
+        "compressor": settings.compressor_model or settings.main_agent_model,
+    }
+    return model_map.get(role, settings.main_agent_model)
