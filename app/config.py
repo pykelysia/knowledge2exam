@@ -58,7 +58,7 @@ class Settings(BaseSettings):
 
     # 嵌入模型（OpenAI 兼容 embeddings 协议）
     embedding_api_key: str = ""
-    embedding_base_url: str = "http://localhost:8000/v1"
+    embedding_base_url: str = "https://api.openai.com/v1"
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
 
