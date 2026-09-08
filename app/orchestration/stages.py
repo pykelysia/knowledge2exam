@@ -1,43 +1,43 @@
 """编排层入口。
 
-真实实现：基于 LangGraph 的 MainAgent 主从式架构（见 app/agents/main_agent.py）。
-MainAgent 调度 SubAgent（Planner/Writer/Reviewer）完成出题任务。
-Fallback：若 LLM 配置缺失或真实流程失败，回退到模拟 pipeline。
+真实实现：文件式 ReAct agent（见 app/agents/agent.py）。
+预处理把用户材料写入 agent 工作区（materials/），agent 规划蓝图并逐题
+产出题目文件，经 persist_exam_result 入库后进入渲染阶段（md 合成 + PDF）。
 """
 
 from __future__ import annotations
 
 import asyncio
-import logging
+import re
 import uuid
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select, func
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.main_agent import run_main_agent
-from app.core.events import EventBus, has_subscribers, subscribe, unsubscribe
-from app.orchestration.integration import integrate_subagent_results
+from app.agents import AgentHooks, run_exam_agent
+from app.agents.workspace import Workspace
 from app.config import settings
 from app.core.db import AsyncSessionLocal
+from app.core.debug_log import log_error, log_step
 from app.core.exceptions import ErrorCode
 from app.core.storage import storage
 from app.ingestion.chunking import Chunker
 from app.ingestion.embedding import EmbeddingClient
 from app.ingestion.parsers import get_parser
 from app.ingestion.postprocess import build_merged_text, process_images
-from app.models.job import Job, JobUpload
+from app.models.job import Job
 from app.models.plan import PlanItem
 from app.models.question import Question
 from app.models.upload import Upload
 from app.orchestration.events import EventBus
+from app.orchestration.integration import persist_exam_result
 from app.orchestration.state_machine import JobStatus, Stage
 from app.rendering.markdown import build_markdown
 from app.rendering.renderer import _get_renderer
-from app.retrieval.past_papers import past_paper_cache
 from app.retrieval.vector_store import PgVectorStore
-
-from app.core.debug_log import log_error, log_step
 
 
 async def _get_job_upload_ids(db: AsyncSession, job_id: uuid.UUID) -> list[uuid.UUID]:
@@ -120,13 +120,12 @@ async def _run_pipeline_with_cancellation(job_id: uuid.UUID) -> None:
 
 
 async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
-    """真实 pipeline：preprocessing -> planning -> fan-out -> reviewer -> rendering。"""
+    """真实 pipeline：preprocessing -> planning -> agent -> rendering。"""
     import time
 
     if await _check_cancelled(db, job.id, bus):
         return
 
-    t0 = time.perf_counter()
     await log_step(
         job_id=str(job.id),
         name="_run_real_pipeline",
@@ -146,8 +145,6 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
     await db.commit()
 
     # 真实解析、切块、嵌入
-    import time
-
     pre_t0 = time.perf_counter()
     context = await _preprocess(db, job, bus)
     pre_elapsed = (time.perf_counter() - pre_t0) * 1000
@@ -157,10 +154,7 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
         name="_preprocess",
         stage=Stage.preprocessing.value,
         input={"upload_count": len(await _get_job_upload_ids(db, job.id))},
-        output={
-            "past_papers": len(context.get("past_papers_full_text_or_none") or ""),
-            "shared_summary": bool(context.get("shared_library_summary")),
-        },
+        output={"materials": context.get("materials", [])},
         elapsed_ms=pre_elapsed,
     )
 
@@ -175,31 +169,66 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
     )
     await db.commit()
 
-    # ---------- main agent (planning + generating + reviewing) ----------
+    # ---------- main agent (planning + generating) ----------
     if await _check_cancelled(db, job.id, bus):
         return
 
     main_agent_context = {
         "duration_minutes": job.duration_minutes,
-        "past_papers_full_text_or_none": context.get("past_papers_full_text_or_none"),
-        "keypoint_list_or_none": context.get("keypoint_list_or_none"),
-        "extra_requirement_or_none": context.get("extra_requirement_or_none"),
-        "shared_library_summary": context.get("shared_library_summary"),
         "need_explanation": job.need_explanation,
-        "enable_review": job.enable_review,
-        "review_mode": "full" if job.enable_review else "format",
-        "max_retries": getattr(settings, "subagent_max_retries", 3),
-        "max_concurrent_writers": getattr(settings, "max_concurrent_writers", 4),
-        "reference_used": "shared_library",
+        "max_retries": settings.agent_max_retries,
+        "school_id": job.school_id,
+        "course_id": job.course_id,
+        "upload_ids": await _get_job_upload_ids(db, job.id),
     }
 
-    main_result = await run_main_agent(
-        job_id=job.id,
-        context=main_agent_context,
+    async def on_plan_ready(todos: list) -> None:  # noqa: ANN001
+        distribution: dict[str, int] = {}
+        for t in todos:
+            distribution[t.question_type] = distribution.get(t.question_type, 0) + 1
+        await bus.emit(
+            job.id,
+            "plan_ready",
+            {
+                "total": len(todos),
+                "distribution": distribution,
+                "reference_used": "agent_planning",
+                "duration_minutes": job.duration_minutes,
+            },
+            stage=Stage.planning.value,
+        )
+
+    async def on_question_accepted(question, completed: int, total: int) -> None:  # noqa: ANN001
+        await bus.emit(
+            job.id,
+            "question_completed",
+            {
+                "seq": question.seq,
+                "question_type": question.question_type,
+                "completed": completed,
+                "total": total,
+            },
+            stage=Stage.generating.value,
+        )
+
+    async def on_warning(message: str) -> None:
+        await bus.emit(
+            job.id,
+            "warning",
+            {"code": ErrorCode.AGENT_WARNING, "message": message},
+            stage=Stage.planning.value,
+        )
+
+    hooks = AgentHooks(
+        on_plan_ready=on_plan_ready,
+        on_question_accepted=on_question_accepted,
+        on_warning=on_warning,
     )
 
-    # 整合 subagent 结果到数据库
-    integration_result = await integrate_subagent_results(db, job.id)
+    main_result = await run_exam_agent(job.id, main_agent_context, hooks)
+
+    # agent 产物入库
+    integration_result = await persist_exam_result(db, job.id, main_result)
 
     # 从数据库加载 plan_items 以计算分布
     all_plan_items = (
@@ -216,11 +245,14 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
 
     await log_step(
         job_id=str(job.id),
-        name="run_main_agent",
+        name="run_exam_agent",
         stage=Stage.planning.value,
         input={"context_keys": list(main_agent_context.keys())},
         output={
-            "main_result": main_result,
+            "plan_items": len(main_result.plan_items),
+            "questions": len(main_result.questions),
+            "abandoned": len(main_result.abandoned_seqs),
+            "completed_normally": main_result.completed_normally,
             "integration": integration_result,
             "distribution": distribution,
         },
@@ -527,25 +559,12 @@ async def run_mock_pipeline(job_id: uuid.UUID) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 真实预处理（解析、切块、嵌入）
+# 真实预处理（解析、切块、嵌入、材料落盘）
 # ---------------------------------------------------------------------------
-
-# 可向量化的内容类型
-_ADDITIVE_TYPES = {
-    "book",
-    "lecture",
-    "note",
-}
-_EXCLUSIVE_TYPES = {
-    "keypoint_list",
-    "past_paper",
-    "manual_text",
-    "extra_requirement",
-}
 
 
 async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, Any]:
-    """解析所有上传件，切块嵌入，准备检索上下文。"""
+    """解析所有上传件，切块嵌入，把用户材料写入 agent 工作区。"""
     from sqlalchemy import select
 
     from app.core.enums import FILE_SOURCE_TYPES, SourceType
@@ -567,8 +586,7 @@ async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, An
         overlap=getattr(settings, "chunk_overlap", 100),
     )
 
-    past_papers: dict[str, Any] = {}
-    additive_chunks: dict[str, list[Any]] = {}
+    past_papers: dict[str, str] = {}
     exclusive_texts: dict[str, list[str]] = {}
 
     # 3. 逐文件/文本解析
@@ -585,7 +603,7 @@ async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, An
             parser = get_parser(upload.filename or "")
             try:
                 data = await storage.get(upload.storage_key)
-                result = parser.parse(upload.filename or "", data)
+                result = await parser.parse(upload.filename or "", data)
 
                 # 图片后处理：去重、合并、间隙标记
                 if result.images:
@@ -627,15 +645,11 @@ async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, An
         await storage.put(parsed_key, json.dumps(text).encode("utf-8"))
 
         if upload.source_type == SourceType.past_paper:
-            # 往期试卷：全文进快读缓存
-            # 构造一个轻量结果对象，保留 .text 以便后续统一处理
-            class _PaperResult:
-                pass
-
-            past_papers[upload.filename or "unnamed"] = _PaperResult()
-            past_papers[upload.filename or "unnamed"].text = text
-        elif upload.source_type in FILE_SOURCE_TYPES - {SourceType.past_paper}:
-            # 可向量化的类型：切块 + 嵌入
+            # 往期试卷：全文留存，稍后写入工作区材料
+            name = upload.filename or f"unnamed_{len(past_papers) + 1}"
+            past_papers[name] = text
+        elif upload.source_type in FILE_SOURCE_TYPES:
+            # 可向量化的文件类：切块 + 嵌入
             chunks = chunker.chunk(
                 text,
                 page=None,
@@ -659,202 +673,41 @@ async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, An
 
                 await vector_store.upsert(chunks)
 
-            # 汇总上下文
-            if upload.source_type in _ADDITIVE_TYPES:
-                additive_chunks.setdefault(upload.source_type.value, []).extend(chunks)
-            else:
+            # 重点清单：全文留存供意图提取与 agent 查阅
+            if upload.source_type == SourceType.keypoint_list:
                 exclusive_texts.setdefault(upload.source_type.value, []).append(text)
+        else:
+            # 文本类（manual_text / extra_requirement）：全文留存
+            exclusive_texts.setdefault(upload.source_type.value, []).append(text)
 
-    # 4. 存快读缓存
-    past_paper_cache.set(job.id, past_papers)
-
-    # 5. 构造 planner context
-    past_papers_full_text = (
-        "\n\n".join(p.text for p in past_papers.values())
-        if past_papers
-        else None
-    )
-    keypoint_list = (
-        "\n\n".join(exclusive_texts.get("keypoint_list", []))
-        if exclusive_texts.get("keypoint_list")
-        else None
-    )
-    extra_requirement = (
-        "\n\n".join(exclusive_texts.get("extra_requirement", []))
-        if exclusive_texts.get("extra_requirement")
-        else None
-    )
-
-    # 6. 多份往期试卷综合（题型分布、知识点、难度三维度）
-    past_papers_data: list[dict[str, Any]] = []
-    if past_papers:
-        # 提取每份试卷的结构化信息
-        for filename, paper in past_papers.items():
-            paper_info: dict[str, Any] = {
-                "filename": filename,
-                "text": paper.text,
-                # 题型分布（从文本中统计各题型题数）
-                "distribution": _extract_type_distribution(paper.text),
-                # 知识点列表（从文本中提取）
-                "knowledge_points": _extract_knowledge_points(paper.text),
-                # 难度分布
-                "difficulty_distribution": _extract_difficulty_distribution(paper.text),
-            }
-            past_papers_data.append(paper_info)
-
-    # 7. 获取共享库摘要（若有 school/course）
-    shared_summary = None
-    if job.school_id and job.course_id:
-        shared_summary = await _get_shared_summary(db, job)
-
-    context = {
-        "past_papers_full_text_or_none": past_papers_full_text,
-        "past_papers_data": past_papers_data,
-        "keypoint_list_or_none": keypoint_list,
-        "extra_requirement_or_none": extra_requirement,
-        "shared_library_summary": shared_summary,
+    # 4. 用户材料写入 agent 工作区（materials/）
+    workspace = Workspace(storage, f"jobs/{job.id}/agent")
+    material_files: list[str] = []
+    for index, (filename, paper_text) in enumerate(sorted(past_papers.items()), start=1):
+        stem = _safe_material_stem(filename) or f"past_paper_{index:02d}"
+        rel = f"materials/{stem}.md"
+        await workspace.write(rel, paper_text)
+        material_files.append(rel)
+    _material_from_texts = {
+        "keypoint_list": "materials/keypoints.md",
+        "extra_requirement": "materials/requirements.md",
+        "manual_text": "materials/manual_text.md",
     }
+    for source_key, rel in _material_from_texts.items():
+        texts = exclusive_texts.get(source_key)
+        if texts:
+            await workspace.write(rel, "\n\n".join(texts))
+            material_files.append(rel)
+
+    context = {"materials": material_files}
 
     await db.commit()
     return context
 
 
-def _extract_type_distribution(text: str) -> dict[str, int]:
-    """从往期试卷文本中提取题型分布。"""
-    distribution: dict[str, int] = {"choice": 0, "blank": 0, "short_answer": 0}
+def _safe_material_stem(filename: str) -> str:
+    """把上传文件名转成材料文件名可用的词干。"""
+    stem = Path(filename).stem
+    safe = re.sub(r"[^A-Za-z0-9_\-]", "_", stem).strip("_")
+    return safe[:60]
 
-    # 简单的关键词匹配（实际可由更复杂的 NLP 替换）
-    choice_markers = ["选择题", "单项选择", "多项选择", "Choose", "Selection"]
-    blank_markers = ["填空题", "Fill in the blank", "____"]
-    short_markers = ["简答题", "论述题", "计算题", "Essay", "Short answer"]
-
-    for marker in choice_markers:
-        if marker in text:
-            distribution["choice"] += 1
-            break
-
-    for marker in blank_markers:
-        if marker in text:
-            distribution["blank"] += 1
-            break
-
-    for marker in short_markers:
-        if marker in text:
-            distribution["short_answer"] += 1
-            break
-
-    # 如果未检测到任何题型，返回默认值
-    total = sum(distribution.values())
-    if total == 0:
-        return {"choice": 5, "blank": 5, "short_answer": 5}
-
-    return distribution
-
-
-def _extract_knowledge_points(text: str) -> list[str]:
-    """从往期试卷文本中提取知识点列表。"""
-    # 简单的知识点提取（实际可由更复杂的 NLP 替换）
-    # 这里返回空列表，由 planner LLM 自行理解
-    return []
-
-
-def _extract_difficulty_distribution(text: str) -> dict[str, float]:
-    """从往期试卷文本中提取难度分布。"""
-    # 简单的难度分布提取
-    easy_count = text.lower().count("easy") + text.count("简单") + text.count("基础")
-    medium_count = text.lower().count("medium") + text.count("中等")
-    hard_count = text.lower().count("hard") + text.count("困难") + text.count("挑战")
-
-    total = easy_count + medium_count + hard_count
-    if total == 0:
-        return {"easy": 0.3, "medium": 0.5, "hard": 0.2}
-
-    return {
-        "easy": easy_count / total,
-        "medium": medium_count / total,
-        "hard": hard_count / total,
-    }
-
-
-async def _get_shared_summary(db: AsyncSession, job: Job) -> str | None:
-    """从共享库检索相关内容，生成摘要供 planner 使用。"""
-    from app.retrieval.vector_store import PgVectorStore
-
-    if not job.school_id or not job.course_id:
-        return None
-
-    # 检索共享库中同校同课程的 book / lecture / note 类型的 chunk
-    vector_store = PgVectorStore(AsyncSessionLocal)
-
-    additive_types = ["book", "lecture", "note"]
-    summaries: list[str] = []
-
-    for source_type in additive_types:
-        filter_expr = {
-            "and": [
-                {"eq": {"school_id": str(job.school_id)}},
-                {"eq": {"course_id": str(job.course_id)}},
-                {"eq": {"source_type": source_type}},
-                {"eq": {"is_shared": True}},
-            ]
-        }
-        result = await vector_store.search(
-            query="",  # 空查询，取全部（后续可优化为随机采样）
-            filter_expr=filter_expr,
-            top_k=5,
-        )
-        if result.chunks:
-            chunk_texts = "\n\n".join(c["text"] for c in result.chunks)
-            summaries.append(f"【{source_type}】\n{chunk_texts}")
-
-    if not summaries:
-        return None
-
-    return "\n\n".join(summaries)
-
-
-async def _retrieve_knowledge_for_plan(
-    db: AsyncSession, job_id: uuid.UUID, plan: PlanItem
-) -> str:
-    """为单个 plan_item 检索相关知识库内容（供换题时复用）。"""
-    from app.models.job import JobUpload
-
-    job = await db.get(Job, job_id)
-    if not job or not job.school_id or not job.course_id:
-        return ""
-
-    upload_ids = (
-        await db.scalars(
-            select(JobUpload.upload_id).where(JobUpload.job_id == job_id)
-        )
-    ).all()
-
-    if not upload_ids:
-        return ""
-
-    vector_store = PgVectorStore(AsyncSessionLocal)
-
-    additive_types = ["book", "lecture", "note"]
-    chunks: list[str] = []
-
-    for source_type in additive_types:
-        filter_expr = {
-            "and": [
-                {"eq": {"school_id": str(job.school_id)}},
-                {"eq": {"course_id": str(job.course_id)}},
-                {"eq": {"source_type": source_type}},
-                {"eq": {"is_shared": True}},
-            ]
-        }
-        try:
-            result = await vector_store.search(
-                query=plan.exam_direction,
-                filter_expr=filter_expr,
-                top_k=3,
-            )
-            for c in result.chunks:
-                chunks.append(c["text"])
-        except Exception:
-            continue
-
-    return "\n\n".join(chunks)
