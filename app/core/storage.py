@@ -28,6 +28,9 @@ class Storage:
     async def delete(self, key: str) -> None:  # pragma: no cover
         raise NotImplementedError
 
+    async def list(self, prefix: str) -> list[str]:  # pragma: no cover
+        raise NotImplementedError
+
     def exists(self, key: str) -> bool:  # pragma: no cover
         raise NotImplementedError
 
@@ -63,6 +66,17 @@ class LocalStorage(Storage):
         p = self._path(key)
         if p.exists():
             p.unlink()
+
+    async def list(self, prefix: str) -> list[str]:
+        """列出前缀下的所有 key（排序后返回）。"""
+        base = self._path(prefix)
+        if not base.exists():
+            return []
+        return sorted(
+            p.relative_to(self.root).as_posix()
+            for p in base.rglob("*")
+            if p.is_file()
+        )
 
     def exists(self, key: str) -> bool:
         return self._path(key).exists()

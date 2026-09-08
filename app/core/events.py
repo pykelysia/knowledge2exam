@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections import defaultdict
+from enum import Enum
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import func, select
@@ -18,6 +20,23 @@ from app.models.job import JobStage
 
 # job_id -> 该任务的活跃订阅者队列集合
 _subscribers: dict[uuid.UUID, set[asyncio.Queue]] = defaultdict(set)
+
+
+def _jsonable(value: Any) -> Any:
+    """把 payload 递归转换为 JSON 可序列化结构（UUID/Enum/Path 等）。"""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonable(v) for v in value]
+    return str(value)
 
 
 class EventBus:
@@ -30,6 +49,7 @@ class EventBus:
         self, job_id: uuid.UUID, event_type: str, data: dict[str, Any], stage: str | None = None
     ) -> int:
         """落盘一条事件，返回其 seq。"""
+        data = _jsonable(data)
         max_seq = await self.db.scalar(
             select(func.coalesce(func.max(JobStage.seq), 0)).where(JobStage.job_id == job_id)
         )
