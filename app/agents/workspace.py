@@ -74,7 +74,7 @@ class Workspace:
         """列出目录下的文件（返回目录内相对路径，排序）。"""
         dir_prefix = f"{self._key(rel_dir)}/"
         keys = await self._storage.list(dir_prefix)
-        return [k[len(dir_prefix):] for k in keys]
+        return [k[len(dir_prefix) :] for k in keys]
 
     # ------------------------------------------------------------------
     # edit 语义

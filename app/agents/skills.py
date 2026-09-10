@@ -90,7 +90,7 @@ def _extract_description(text: str) -> str:
         desc = _DESCRIPTION_RE.search(match.group(1))
         if desc:
             return desc.group(1).strip().strip('"').strip("'")
-        body = text[match.end():]
+        body = text[match.end() :]
     else:
         body = text
     for para in body.split("\n\n"):

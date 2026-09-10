@@ -67,9 +67,7 @@ class ExamQuestion(BaseModel):
     seq: int = Field(ge=1, description="题号，与蓝图一致")
     question_type: str = Field(description=f"题型：{'/'.join(QUESTION_TYPES)}")
     stem: str = Field(min_length=1, description="题干；填空题空位用 ______ 表示")
-    options: dict[str, str] | None = Field(
-        default=None, description="仅选择题：A-D 四个选项内容"
-    )
+    options: dict[str, str] | None = Field(default=None, description="仅选择题：A-D 四个选项内容")
     answer: str = Field(min_length=1, description="正确答案；选择题为 A-D 其一")
     sub_questions: list[str] | None = Field(
         default=None, description="仅简答题：子问题列表，可省略"
