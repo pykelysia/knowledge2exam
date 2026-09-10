@@ -81,6 +81,12 @@ async def finalize(
     questions: list[ExamQuestion] = []
     for name in await ctx.workspace.list_dir("questions"):
         rel = f"questions/{name}"
+        if not _QUESTION_PATH_RE.match(rel):
+            logger.warning("跳过命名不合规的题目文件 %s", rel)
+            await ctx.hooks.fire_warning(
+                f"题目文件 {rel} 不符合 questions/NNN.json 命名规范，已跳过"
+            )
+            continue
         try:
             raw = await ctx.workspace.read(rel)
             questions.append(ExamQuestion.model_validate(json.loads(raw)))
@@ -147,15 +153,11 @@ class LoadSkillArgs(BaseModel):
 
 def _todo_write_tool(ctx: AgentContext) -> StructuredTool:
     async def todo_write(todos: list[TodoItem]) -> str:
-        seqs = [t.seq for t in todos]
+        seqs = sorted(t.seq for t in todos)
         if len(seqs) != len(set(seqs)):
             return "错误：todo 中存在重复的 seq，请修正后重新提交。"
         todos = sorted(todos, key=lambda t: t.seq)
-        gaps = [
-            f"{a}→{b}"
-            for a, b in zip(seqs, seqs[1:], strict=False)
-            if b - a > 1
-        ]
+        gaps = [f"{a}→{b}" for a, b in zip(seqs, seqs[1:], strict=False) if b - a > 1]
         first = not ctx.plan_ready_fired
         ctx.todos = todos
         ctx.plan_ready_fired = True
@@ -170,9 +172,7 @@ def _todo_write_tool(ctx: AgentContext) -> StructuredTool:
                 done += 1
         dist = "、".join(f"{k} {v} 题" for k, v in by_type.items())
         gap_note = f"（注意 seq 不连续：{'、'.join(gaps)}）" if gaps else ""
-        return (
-            f"蓝图已保存：共 {len(todos)} 题（{dist}）{gap_note}，已完成 {done}/{len(todos)}。"
-        )
+        return f"蓝图已保存：共 {len(todos)} 题（{dist}）{gap_note}，已完成 {done}/{len(todos)}。"
 
     return StructuredTool.from_function(
         coroutine=todo_write,
@@ -221,9 +221,7 @@ def _read_file_tool(ctx: AgentContext) -> StructuredTool:
     )
 
 
-def _validate_question(
-    ctx: AgentContext, question: ExamQuestion
-) -> str | None:
+def _validate_question(ctx: AgentContext, question: ExamQuestion) -> str | None:
     """题目内容校验，返回错误文本或 None。Pydantic 校验之外的业务规则在此。"""
     if ctx.need_explanation:
         if not (question.explanation or "").strip():
@@ -237,6 +235,12 @@ def _edit_file_tool(ctx: AgentContext) -> StructuredTool:
             match = _QUESTION_PATH_RE.match(path)
             if match:
                 return await _write_question(ctx, int(match.group(1)), path, new_string)
+            if path.startswith("questions/"):
+                # 不合规命名的题目会绕过 seq 校验、干扰 finalize 的扫描，直接拒绝
+                return (
+                    f"题目文件命名非法：{path}。题目必须写入 questions/NNN.json"
+                    "（NNN 为三位题号，如 questions/003.json）。"
+                )
             result = await ctx.workspace.edit(path, old_string, new_string)
             verb = "已创建" if result.created else "已修改"
             return f"{path} {verb}（{len(result.content)} 字符）。"
@@ -258,6 +262,7 @@ def _edit_file_tool(ctx: AgentContext) -> StructuredTool:
 
 async def _write_question(ctx: AgentContext, seq: int, path: str, new_string: str) -> str:
     """写入题目文件：解析 → 校验 → 落盘 → 事件。失败时计入重试。"""
+    error: str | None
     try:
         data = json.loads(new_string)
         question = ExamQuestion.model_validate(data)
@@ -267,6 +272,13 @@ async def _write_question(ctx: AgentContext, seq: int, path: str, new_string: st
         error = str(exc)
     else:
         error = _validate_question(ctx, question)
+        if error is None and question.seq != seq:
+            # 内容 seq 与文件名不一致会让 finalize 产出重复 seq，
+            # 在入库 flush 时触发唯一约束冲突，必须在落盘前拦下。
+            error = (
+                f"JSON 内容的 seq={question.seq} 与文件名编号 {seq} 不一致，"
+                "请让 JSON 中的 seq 字段与文件名 NNN 保持一致。"
+            )
 
     if error is not None:
         count = ctx.retry_counts.get(seq, 0) + 1
@@ -276,7 +288,8 @@ async def _write_question(ctx: AgentContext, seq: int, path: str, new_string: st
             await ctx.hooks.fire_warning(f"第 {seq} 题连续 {count} 次校验失败，已放弃：{error}")
             return (
                 f"第 {seq} 题已放弃：连续 {count} 次校验失败（{error}）。"
-                "请用 todo_write 将该题标记为「[已放弃]」并继续下一题。"
+                "请在下一次 todo_write 中把该题的 knowledge_point 改为「[已放弃] <原因>」"
+                "并把 status 置为 completed，然后继续下一题。"
             )
         return f"第 {seq} 题校验失败（第 {count}/{ctx.max_retries} 次）：{error} 请修正后重试。"
 
@@ -289,7 +302,6 @@ async def _write_question(ctx: AgentContext, seq: int, path: str, new_string: st
         total = max(total, len(ctx.accepted_seqs))
         await ctx.hooks.fire_question_accepted(question, len(ctx.accepted_seqs), total)
     return f"第 {seq} 题已保存。进度 {len(ctx.accepted_seqs)}/{total}。"
-
 
 
 def _search_knowledge_tool(ctx: AgentContext) -> StructuredTool:
@@ -330,21 +342,25 @@ def _knowledge_filter(ctx: AgentContext) -> dict[str, Any] | None:
     branches: list[dict[str, Any]] = []
     for st in _KNOWLEDGE_SOURCE_TYPES:
         if ctx.upload_ids:
-            branches.append({
-                "and": [
-                    {"in": {"upload_id": [str(u) for u in ctx.upload_ids]}},
-                    {"eq": {"source_type": st.value}},
-                ],
-            })
+            branches.append(
+                {
+                    "and": [
+                        {"in": {"upload_id": [str(u) for u in ctx.upload_ids]}},
+                        {"eq": {"source_type": st.value}},
+                    ],
+                }
+            )
         if ctx.school_id and ctx.course_id:
-            branches.append({
-                "and": [
-                    {"eq": {"school_id": str(ctx.school_id)}},
-                    {"eq": {"course_id": str(ctx.course_id)}},
-                    {"eq": {"source_type": st.value}},
-                    {"eq": {"is_shared": True}},
-                ],
-            })
+            branches.append(
+                {
+                    "and": [
+                        {"eq": {"school_id": str(ctx.school_id)}},
+                        {"eq": {"course_id": str(ctx.course_id)}},
+                        {"eq": {"source_type": st.value}},
+                        {"eq": {"is_shared": True}},
+                    ],
+                }
+            )
     if not branches:
         return None
     return {"or": branches} if len(branches) > 1 else branches[0]

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import Any
 from uuid import UUID
 
 from langchain.agents import create_agent
@@ -23,20 +24,20 @@ from app.agents.prompts import load_prompt, render_prompt
 from app.agents.schemas import AgentHooks, AgentSummary, ExamResult
 from app.agents.skills import SkillLoader
 from app.agents.tools import AgentContext, build_agent_tools, finalize
-from app.agents.workspace import Workspace
+from app.agents.workspace import Workspace, WorkspaceError
 from app.config import settings
 from app.core.db import AsyncSessionLocal
-from app.core.storage import storage
+from app.core.storage import StorageError, storage
 from app.retrieval.vector_store import PgVectorStore
 
 logger = logging.getLogger(__name__)
 
-_INTENT_MATERIALS = ("materials/keypoints.md", "materials/requirements.md")
+_DEFAULT_DURATION_MINUTES = 100
 
 
 async def run_exam_agent(
     job_id: UUID,
-    context: dict,
+    context: dict[str, Any],
     hooks: AgentHooks | None = None,
 ) -> ExamResult:
     """执行试卷生成 agent，返回结构化结果。
@@ -63,11 +64,12 @@ async def run_exam_agent(
     )
 
     model = get_chat_model()
+    duration = int(context.get("duration_minutes", _DEFAULT_DURATION_MINUTES))
 
     # ---------- 意图提取 ----------
     intent = await extract_intent(
         model,
-        duration_minutes=int(context.get("duration_minutes", 100)),
+        duration_minutes=duration,
         keypoint_list=await _read_optional_material(workspace, "materials/keypoints.md"),
         extra_requirement=await _read_optional_material(workspace, "materials/requirements.md"),
     )
@@ -77,7 +79,6 @@ async def run_exam_agent(
     material_list = (
         "\n".join(f"- materials/{name}" for name in materials) if materials else "（无材料）"
     )
-    duration = int(context.get("duration_minutes", 100))
     system_prompt = render_prompt(
         load_prompt("system"),
         duration_minutes=str(duration),
@@ -105,10 +106,16 @@ async def run_exam_agent(
     summary_text = ""
     try:
         state = await agent.ainvoke(
-            {"messages": [HumanMessage(content=(
-                "请开始组卷。先阅读材料与技能，规划蓝图后逐题完成，"
-                "全部完成后输出总结并结束。"
-            ))]},
+            {
+                "messages": [
+                    HumanMessage(
+                        content=(
+                            "请开始组卷。先阅读材料与技能，规划蓝图后逐题完成，"
+                            "全部完成后输出总结并结束。"
+                        )
+                    )
+                ]
+            },
             config={"recursion_limit": settings.agent_recursion_limit},
         )
         structured = state.get("structured_response")
@@ -128,8 +135,9 @@ async def run_exam_agent(
 
 
 async def _read_optional_material(workspace: Workspace, rel: str) -> str | None:
-    """读取可选材料文件，不存在返回 None。"""
+    """读取可选材料文件，不存在（或读取失败）返回 None。"""
     try:
         return await workspace.read(rel)
-    except Exception:
+    except (WorkspaceError, StorageError) as exc:
+        logger.warning("可选材料读取失败，按不存在处理 %s: %s", rel, exc)
         return None

@@ -38,10 +38,10 @@ async def extract_intent(
     try:
         structured = model.with_structured_output(ExamIntent)
         intent = await structured.ainvoke(prompt)
-        return intent or _fallback_intent()
     except Exception as exc:
         logger.warning("意图提取失败，使用默认意图: %s", exc)
         return _fallback_intent()
+    return intent if isinstance(intent, ExamIntent) else _fallback_intent()
 
 
 def _fallback_intent() -> ExamIntent:
