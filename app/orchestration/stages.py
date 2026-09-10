@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import uuid
 from datetime import UTC, datetime
@@ -22,38 +23,34 @@ from app.agents.workspace import Workspace
 from app.config import settings
 from app.core.db import AsyncSessionLocal
 from app.core.debug_log import log_error, log_step
+from app.core.enums import FILE_SOURCE_TYPES, TEXT_SOURCE_TYPES, SourceType
 from app.core.exceptions import ErrorCode
-from app.core.storage import storage
+from app.core.storage import StorageError, storage
 from app.ingestion.chunking import Chunker
 from app.ingestion.embedding import EmbeddingClient
 from app.ingestion.parsers import get_parser
 from app.ingestion.postprocess import build_merged_text, process_images
-from app.models.job import Job
+from app.models.job import Job, JobUpload
 from app.models.plan import PlanItem
 from app.models.question import Question
+from app.models.resource import Resource
 from app.models.upload import Upload
 from app.orchestration.events import EventBus
 from app.orchestration.integration import persist_exam_result
 from app.orchestration.state_machine import JobStatus, Stage
 from app.rendering.markdown import build_markdown
-from app.rendering.renderer import _get_renderer
+from app.rendering.renderer import get_renderer
 from app.retrieval.vector_store import PgVectorStore
 
 
 async def _get_job_upload_ids(db: AsyncSession, job_id: uuid.UUID) -> list[uuid.UUID]:
     """从 job_upload 中间表获取某个 job 关联的 upload_id 列表。"""
-    from app.models.job import JobUpload
-
-    result = await db.scalars(
-        select(JobUpload.upload_id).where(JobUpload.job_id == job_id)
-    )
+    result = await db.scalars(select(JobUpload.upload_id).where(JobUpload.job_id == job_id))
     return list(result.all())
 
 
 async def _check_cancelled(db: AsyncSession, job_id: uuid.UUID, bus: EventBus) -> bool:
     """检查 job 是否已被取消，如果是则发送 done 事件并返回 True。"""
-    from app.models.job import Job
-
     job = await db.get(Job, job_id)
     if job and job.status == JobStatus.cancelled.value:
         await bus.emit_and_close(
@@ -76,8 +73,7 @@ async def run_pipeline(job_id: uuid.UUID) -> None:
         bus = EventBus(db)
 
         has_llm = bool(
-            getattr(settings, "llm_api_key", None)
-            and getattr(settings, "llm_base_url", None)
+            getattr(settings, "llm_api_key", None) and getattr(settings, "llm_base_url", None)
         )
 
         if not has_llm:
@@ -138,7 +134,8 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
         return
     job.status = JobStatus.preprocessing.value
     await bus.emit(
-        job.id, "stage_changed",
+        job.id,
+        "stage_changed",
         {"stage": Stage.preprocessing.value, "previous": JobStatus.pending.value},
         stage=Stage.preprocessing.value,
     )
@@ -163,7 +160,8 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
         return
     job.status = JobStatus.planning.value
     await bus.emit(
-        job.id, "stage_changed",
+        job.id,
+        "stage_changed",
         {"stage": Stage.planning.value, "previous": Stage.preprocessing.value},
         stage=Stage.planning.value,
     )
@@ -267,16 +265,15 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
     previous_stage = Stage.reviewing if job.enable_review else Stage.generating
     job.status = JobStatus.rendering.value
     await bus.emit(
-        job.id, "stage_changed",
+        job.id,
+        "stage_changed",
         {"stage": Stage.rendering.value, "previous": previous_stage.value},
         stage=Stage.rendering.value,
     )
     await db.commit()
 
     q_rows = (
-        await db.scalars(
-            select(Question).where(Question.job_id == job.id).order_by(Question.seq)
-        )
+        await db.scalars(select(Question).where(Question.job_id == job.id).order_by(Question.seq))
     ).all()
     questions = list(q_rows)
 
@@ -294,9 +291,7 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
     ).all()
     plan_map = {p.seq: p for p in all_plan_items}
 
-    questions_with_plan = [
-        (plan_map.get(q.seq), q) for q in active_questions if q.seq in plan_map
-    ]
+    questions_with_plan = [(plan_map.get(q.seq), q) for q in active_questions if q.seq in plan_map]
 
     md_text = build_markdown(
         title=f"试卷（{job.duration_minutes} 分钟）",
@@ -304,14 +299,11 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
         need_explanation=job.need_explanation,
     )
 
-    import time
-
     render_t0 = time.perf_counter()
     md_key = f"jobs/{job.id}/output/paper.md"
-    from app.core.storage import storage
     await storage.put(md_key, md_text.encode("utf-8"))
 
-    renderer = _get_renderer()
+    renderer = get_renderer()
     result = await renderer.render(
         f"试卷（{job.duration_minutes} 分钟）",
         [
@@ -330,7 +322,8 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
     )
 
     pdf_key = f"jobs/{job.id}/output/paper.pdf"
-    await storage.put(pdf_key, result.pdf)
+    if result.pdf is not None:
+        await storage.put(pdf_key, result.pdf)
     render_elapsed = (time.perf_counter() - render_t0) * 1000
 
     await log_step(
@@ -345,9 +338,7 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
     job.md_key = md_key
     job.pdf_key = None if result.pdf_failed else pdf_key
     job.status = (
-        JobStatus.completed.value
-        if not result.pdf_failed
-        else JobStatus.partially_completed.value
+        JobStatus.completed.value if not result.pdf_failed else JobStatus.partially_completed.value
     )
     await db.commit()
 
@@ -355,7 +346,8 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
     abandoned_count = sum(1 for q in questions if q.status == "abandoned")
 
     await bus.emit_and_close(
-        job.id, "done",
+        job.id,
+        "done",
         {
             "status": job.status,
             "total": job.planned_total or 0,
@@ -389,7 +381,8 @@ async def run_mock_pipeline(job_id: uuid.UUID) -> None:
 
         job.status = JobStatus.preprocessing.value
         await bus.emit(
-            job.id, "stage_changed",
+            job.id,
+            "stage_changed",
             {"stage": Stage.preprocessing.value, "previous": JobStatus.pending.value},
             stage=Stage.preprocessing.value,
         )
@@ -400,7 +393,8 @@ async def run_mock_pipeline(job_id: uuid.UUID) -> None:
             return
         job.status = JobStatus.planning.value
         await bus.emit(
-            job.id, "stage_changed",
+            job.id,
+            "stage_changed",
             {"stage": Stage.planning.value, "previous": Stage.preprocessing.value},
             stage=Stage.planning.value,
         )
@@ -408,7 +402,8 @@ async def run_mock_pipeline(job_id: uuid.UUID) -> None:
         await asyncio.sleep(getattr(settings, "mock_stage_delay_seconds", 0.5))
 
         await bus.emit(
-            job.id, "plan_ready",
+            job.id,
+            "plan_ready",
             {
                 "total": _MOCK_TOTAL,
                 "distribution": _MOCK_DISTRIBUTION,
@@ -425,7 +420,8 @@ async def run_mock_pipeline(job_id: uuid.UUID) -> None:
             return
         job.status = JobStatus.generating.value
         await bus.emit(
-            job.id, "stage_changed",
+            job.id,
+            "stage_changed",
             {"stage": Stage.generating.value, "previous": Stage.planning.value},
             stage=Stage.generating.value,
         )
@@ -474,7 +470,8 @@ async def run_mock_pipeline(job_id: uuid.UUID) -> None:
             await db.flush()
 
             await bus.emit(
-                job.id, "question_completed",
+                job.id,
+                "question_completed",
                 {
                     "seq": seq,
                     "question_type": question_type,
@@ -491,7 +488,8 @@ async def run_mock_pipeline(job_id: uuid.UUID) -> None:
                 return
             job.status = JobStatus.reviewing.value
             await bus.emit(
-                job.id, "stage_changed",
+                job.id,
+                "stage_changed",
                 {"stage": Stage.reviewing.value, "previous": Stage.generating.value},
                 stage=Stage.reviewing.value,
             )
@@ -499,7 +497,8 @@ async def run_mock_pipeline(job_id: uuid.UUID) -> None:
             await asyncio.sleep(getattr(settings, "mock_stage_delay_seconds", 0.5))
 
             await bus.emit(
-                job.id, "review_result",
+                job.id,
+                "review_result",
                 {"checked": _MOCK_TOTAL, "passed": _MOCK_TOTAL, "rejected": [], "auto_fixed": []},
                 stage=Stage.reviewing.value,
             )
@@ -511,7 +510,8 @@ async def run_mock_pipeline(job_id: uuid.UUID) -> None:
             return
         job.status = JobStatus.rendering.value
         await bus.emit(
-            job.id, "stage_changed",
+            job.id,
+            "stage_changed",
             {"stage": Stage.rendering.value, "previous": previous.value},
             stage=Stage.rendering.value,
         )
@@ -532,12 +532,13 @@ async def run_mock_pipeline(job_id: uuid.UUID) -> None:
             for i, (t, opts, ans) in enumerate(type_specs)
         ]
 
-        renderer = _get_renderer()
+        renderer = get_renderer()
         result = await renderer.render(f"模拟试卷（{job.duration_minutes} 分钟）", questions)
         md_key = f"jobs/{job_id}/output/paper.md"
         pdf_key = f"jobs/{job_id}/output/paper.pdf"
         await storage.put(md_key, result.md)
-        await storage.put(pdf_key, result.pdf)
+        if result.pdf is not None:
+            await storage.put(pdf_key, result.pdf)
         job.md_key = md_key
         job.pdf_key = pdf_key
 
@@ -545,7 +546,8 @@ async def run_mock_pipeline(job_id: uuid.UUID) -> None:
         await db.commit()
 
         await bus.emit_and_close(
-            job.id, "done",
+            job.id,
+            "done",
             {
                 "status": JobStatus.completed.value,
                 "total": _MOCK_TOTAL,
@@ -565,15 +567,12 @@ async def run_mock_pipeline(job_id: uuid.UUID) -> None:
 
 async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, Any]:
     """解析所有上传件，切块嵌入，把用户材料写入 agent 工作区。"""
-    from sqlalchemy import select
-
-    from app.core.enums import FILE_SOURCE_TYPES, SourceType
-    from app.models.resource import Resource
-
-    # 1. 加载 uploads
+    # 1. 加载 uploads（按创建时间排序，保证材料命名与撞名后缀的确定性）
     upload_rows = (
         await db.scalars(
-            select(Upload).where(Upload.id.in_(await _get_job_upload_ids(db, job.id)))
+            select(Upload)
+            .where(Upload.id.in_(await _get_job_upload_ids(db, job.id)))
+            .order_by(Upload.created_at)
         )
     ).all()
     uploads = list(upload_rows)
@@ -586,12 +585,10 @@ async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, An
         overlap=getattr(settings, "chunk_overlap", 100),
     )
 
-    past_papers: dict[str, str] = {}
+    past_papers: list[tuple[str, str]] = []
     exclusive_texts: dict[str, list[str]] = {}
 
     # 3. 逐文件/文本解析
-    from app.core.enums import TEXT_SOURCE_TYPES
-
     for upload in uploads:
         # 文本类上传（manual_text / extra_requirement）没有 filename，
         # 直接使用 raw_text，无需调用文件解析器。
@@ -602,6 +599,8 @@ async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, An
         else:
             parser = get_parser(upload.filename or "")
             try:
+                if not upload.storage_key:
+                    raise StorageError(f"上传件缺少存储对象: id={upload.id}")
                 data = await storage.get(upload.storage_key)
                 result = await parser.parse(upload.filename or "", data)
 
@@ -619,11 +618,15 @@ async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, An
             except Exception as exc:
                 upload.parse_status = "failed"
                 upload.parse_error = str(exc)
-                await bus.emit(job.id, "warning", {
-                    "code": ErrorCode.PARSE_FAILED,
-                    "upload_id": upload.id,
-                    "message": str(exc),
-                })
+                await bus.emit(
+                    job.id,
+                    "warning",
+                    {
+                        "code": ErrorCode.PARSE_FAILED,
+                        "upload_id": upload.id,
+                        "message": str(exc),
+                    },
+                )
                 await db.commit()
                 continue
 
@@ -641,13 +644,11 @@ async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, An
 
         # 存解析产物到对象存储
         parsed_key = f"jobs/{job.id}/parsed/{resource.id}.json"
-        import json
         await storage.put(parsed_key, json.dumps(text).encode("utf-8"))
 
         if upload.source_type == SourceType.past_paper:
             # 往期试卷：全文留存，稍后写入工作区材料
-            name = upload.filename or f"unnamed_{len(past_papers) + 1}"
-            past_papers[name] = text
+            past_papers.append((upload.filename or f"unnamed_{len(past_papers) + 1}", text))
         elif upload.source_type in FILE_SOURCE_TYPES:
             # 可向量化的文件类：切块 + 嵌入
             chunks = chunker.chunk(
@@ -666,9 +667,7 @@ async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, An
                     chunk.course_id = job.course_id
                     chunk.source_type = upload.source_type
                     chunk.is_shared = (
-                        upload.shareable
-                        and job.school_id is not None
-                        and job.course_id is not None
+                        upload.shareable and job.school_id is not None and job.course_id is not None
                     )
 
                 await vector_store.upsert(chunks)
@@ -683,8 +682,13 @@ async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, An
     # 4. 用户材料写入 agent 工作区（materials/）
     workspace = Workspace(storage, f"jobs/{job.id}/agent")
     material_files: list[str] = []
-    for index, (filename, paper_text) in enumerate(sorted(past_papers.items()), start=1):
+    used_stems: set[str] = set()
+    for index, (filename, paper_text) in enumerate(past_papers, start=1):
         stem = _safe_material_stem(filename) or f"past_paper_{index:02d}"
+        if stem in used_stems:
+            # 同名或清洗后撞名的试卷：追加序号，避免后写覆盖先写
+            stem = f"{stem}_{index:02d}"
+        used_stems.add(stem)
         rel = f"materials/{stem}.md"
         await workspace.write(rel, paper_text)
         material_files.append(rel)
@@ -710,4 +714,3 @@ def _safe_material_stem(filename: str) -> str:
     stem = Path(filename).stem
     safe = re.sub(r"[^A-Za-z0-9_\-]", "_", stem).strip("_")
     return safe[:60]
-
