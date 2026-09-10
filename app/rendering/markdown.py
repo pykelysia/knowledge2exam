@@ -10,13 +10,12 @@
 from __future__ import annotations
 
 import re
-
-from app.schemas.job import Stage
+from typing import Any
 
 
 def _plan_comment(plan_item: Any) -> str:
     return (
-        f'<!-- plan_item: seq={plan_item.seq} '
+        f"<!-- plan_item: seq={plan_item.seq} "
         f'knowledge_point="{plan_item.knowledge_point}" '
         f'exam_direction="{plan_item.exam_direction}" '
         f'difficulty="{plan_item.difficulty}" '
@@ -90,7 +89,8 @@ def _answer_block(q: Any, seq: int, show_explanation: bool) -> list[str]:
 
 
 def _clean_literal_escapes(md_text: str) -> str:
-    """清理 markdown 中的字面量转义序列（如 `\\n`、`\\t`），避免 Pandoc 渲染为 PDF 时生成无效 LaTeX。
+    """清理 markdown 中的字面量转义序列（如 `\\n`、`\\t`），
+    避免 Pandoc 渲染为 PDF 时生成无效 LaTeX。
 
     LLM 有时会生成包含字面量 ``\\n``/``\\t`` 的代码片段，而不是真正的换行/制表符。
     此函数会：
@@ -192,15 +192,15 @@ def build_markdown(
     lines.append("")
 
     seq = 0
-    for plan, q in choice_items:
+    for _plan, q in choice_items:
         seq += 1
         lines.extend(_answer_block(q, seq, need_explanation))
 
-    for plan, q in blank_items:
+    for _plan, q in blank_items:
         seq += 1
         lines.extend(_answer_block(q, seq, need_explanation))
 
-    for plan, q in short_items:
+    for _plan, q in short_items:
         seq += 1
         lines.extend(_answer_block(q, seq, need_explanation))
 

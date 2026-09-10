@@ -11,11 +11,8 @@ import logging
 import os
 import shutil
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Literal
 
 from app.rendering.setup import ensure_pandoc_available
-
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +39,7 @@ class StubRenderer(Renderer):
         for q in questions:
             md_lines.append(f"{q['seq']}. {q['stem']}")
             if q.get("options"):
-                md_lines.append(
-                    "   " + " ".join(f"{k}. {v}" for k, v in q["options"].items())
-                )
+                md_lines.append("   " + " ".join(f"{k}. {v}" for k, v in q["options"].items()))
             md_lines.append("")
         md_lines.append("---")
         md_lines.append("")
@@ -87,6 +82,7 @@ class PandocXeLaTeXRenderer(Renderer):
         if extra:
             try:
                 import json
+
                 self.extra_args = json.loads(extra)
             except (json.JSONDecodeError, ValueError):
                 logger.warning("PDF_EXTRA_ARGS 解析失败，忽略: %s", extra)
@@ -114,10 +110,13 @@ class PandocXeLaTeXRenderer(Renderer):
         for font in font_candidates:
             if shutil.which("fc-list"):
                 import subprocess
+
                 try:
                     result = subprocess.run(
                         ["fc-list", ":lang=zh", font],
-                        capture_output=True, text=True, timeout=5,
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
                     )
                     if result.returncode == 0 and result.stdout.strip():
                         return font
@@ -138,14 +137,19 @@ class PandocXeLaTeXRenderer(Renderer):
         # 3. 构建 pandoc 命令
         cmd: list[str] = [
             pandoc,
-            "-f", "markdown",
-            "-t", "pdf",
+            "-f",
+            "markdown",
+            "-t",
+            "pdf",
             "--pdf-engine=" + self.pdf_engine,
             "--toc",
             "--mathjax",
-            "-V", f"title={title}",
-            "-V", "geometry:margin=2.5cm",
-            "-V", "linestretch=1.5",
+            "-V",
+            f"title={title}",
+            "-V",
+            "geometry:margin=2.5cm",
+            "-V",
+            "linestretch=1.5",
         ]
 
         if self.mainfont:
@@ -156,10 +160,14 @@ class PandocXeLaTeXRenderer(Renderer):
             cmd.extend(["-V", f"monofont={self.monofont}"])
 
         # CJK 相关微调
-        cmd.extend([
-            "-V", "CJKmainfont=" + (self.mainfont or "Noto Sans CJK SC"),
-            "-V", "documentclass=ctexart",
-        ])
+        cmd.extend(
+            [
+                "-V",
+                "CJKmainfont=" + (self.mainfont or "Noto Sans CJK SC"),
+                "-V",
+                "documentclass=ctexart",
+            ]
+        )
 
         cmd.extend(self.extra_args)
 
@@ -175,7 +183,7 @@ class PandocXeLaTeXRenderer(Renderer):
                 proc.communicate(input=md_bytes),
                 timeout=self.timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.error("PDF 渲染超时（%ds）", self.timeout)
             raise
         except FileNotFoundError as exc:
@@ -189,7 +197,8 @@ class PandocXeLaTeXRenderer(Renderer):
             err_text = stderr.decode("utf-8", errors="replace")[:500]
             logger.error(
                 "Pandoc 退出码 %d: %s",
-                proc.returncode, err_text,
+                proc.returncode,
+                err_text,
             )
             raise RuntimeError(f"Pandoc 渲染失败，退出码 {proc.returncode}: {err_text}")
 
@@ -225,7 +234,7 @@ class PandocXeLaTeXRenderer(Renderer):
         return "\n".join(lines)
 
 
-def _get_renderer() -> Renderer:
+def get_renderer() -> Renderer:
     """根据环境选择渲染器。
 
     若设置 PDF_RAISE_ON_MISSING=1，则 pandoc 缺失时抛异常；
