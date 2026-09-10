@@ -9,14 +9,16 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-_PROMPTS_DIR = Path(__file__).parent
+_PROMPTS_DIR = Path(__file__).resolve().parent
 _PLACEHOLDER_RE = re.compile(r"\{\{\s*(\w+)\s*\}\}")
 
 
 def load_prompt(name: str) -> str:
     """读取 prompts/ 下的模板文件（如 "system"、"intent"）。"""
     path = (_PROMPTS_DIR / f"{name}.md").resolve()
-    if not str(path).startswith(str(_PROMPTS_DIR)) or not path.is_file():
+    # is_relative_to 按路径分量比较，避免 startswith 的前缀误判
+    # （如 ../prompts_backup/x 也能通过 str.startswith(prompts)）
+    if not path.is_relative_to(_PROMPTS_DIR) or not path.is_file():
         raise FileNotFoundError(f"提示词模板不存在: {name}")
     return path.read_text(encoding="utf-8")
 
