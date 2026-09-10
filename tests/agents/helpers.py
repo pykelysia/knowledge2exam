@@ -7,6 +7,7 @@ from typing import Any
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
+from pydantic import Field
 
 from app.agents.schemas import AgentHooks, ExamQuestion, TodoItem
 
@@ -25,18 +26,15 @@ class FakeToolModel(BaseChatModel):
 
     responses: list[BaseMessage]
     step: int = 0
-    bound_tool_names: list[str] = []
-    seen_messages: list[list[BaseMessage]] = []
+    bound_tool_names: list[str] = Field(default_factory=list)
+    seen_messages: list[list[BaseMessage]] = Field(default_factory=list)
 
     @property
     def _llm_type(self) -> str:
         return "fake-tool-model"
 
     def bind_tools(self, tools: Any, **kwargs: Any) -> FakeToolModel:  # noqa: ANN401
-        names = []
-        for t in tools:
-            names.append(t["name"] if isinstance(t, dict) else t.name)
-        self.bound_tool_names = sorted(names)
+        self.bound_tool_names = sorted(t["name"] if isinstance(t, dict) else t.name for t in tools)
         return self
 
     def _generate(

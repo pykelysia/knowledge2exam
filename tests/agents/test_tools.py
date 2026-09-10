@@ -19,10 +19,18 @@ from tests.agents.helpers import Recorder
 
 def make_ctx(tmp_path: Path, **overrides: object) -> AgentContext:
     ws = Workspace(LocalStorage(tmp_path), prefix=f"jobs/{uuid4()}/agent")
+    # 技能目录也放在 tmp_path，测试不依赖仓库真实目录与 cwd
+    skills_dir = tmp_path / "skills"
+    skill_file = skills_dir / "exam-authoring" / "SKILL.md"
+    skill_file.parent.mkdir(parents=True, exist_ok=True)
+    skill_file.write_text(
+        "---\ndescription: 出题规范\n---\n\n题目文件 questions/NNN.json 的规范说明。\n",
+        encoding="utf-8",
+    )
     defaults: dict = {
         "job_id": uuid4(),
         "workspace": ws,
-        "skills": SkillLoader(Path("./skills")),
+        "skills": SkillLoader(skills_dir),
         "vector_store": StubStore(),
         "hooks": Recorder().hooks(),
         "max_retries": 2,
@@ -39,9 +47,7 @@ class StubStore(VectorStore):
         self.error = error
         self.filter_exprs: list[dict] = []
 
-    async def search(
-        self, query: str, filter_expr: dict, top_k: int = 5
-    ) -> RetrievalResult:
+    async def search(self, query: str, filter_expr: dict, top_k: int = 5) -> RetrievalResult:
         self.filter_exprs.append(filter_expr)
         if self.error:
             raise self.error
@@ -110,9 +116,7 @@ class TestCheckTodo:
     async def test_marks(self, tmp_path: Path, recorder: Recorder) -> None:
         ctx = make_ctx(tmp_path, hooks=recorder.hooks())
         (todo_write, check_todo, *_rest) = build_agent_tools(ctx)
-        await todo_write.coroutine(
-            todos=[todo(1, status="in_progress"), todo(2, status="pending")]
-        )
+        await todo_write.coroutine(todos=[todo(1, status="in_progress"), todo(2, status="pending")])
         text = await check_todo.coroutine()
         assert "[>]" in text and "[ ]" in text
 
@@ -132,9 +136,7 @@ class TestReadFile:
 
 
 class TestEditFileQuestion:
-    async def test_valid_question_accepted(
-        self, tmp_path: Path, recorder: Recorder
-    ) -> None:
+    async def test_valid_question_accepted(self, tmp_path: Path, recorder: Recorder) -> None:
         ctx = make_ctx(tmp_path, hooks=recorder.hooks())
         (todo_write, _c, _r, edit_file, *_rest) = build_agent_tools(ctx)
         await todo_write.coroutine(todos=[todo(1), todo(2)])
@@ -157,9 +159,7 @@ class TestEditFileQuestion:
         assert not await ctx.workspace.exists("questions/001.json")
         assert recorder.questions == []
 
-    async def test_max_retries_abandons(
-        self, tmp_path: Path, recorder: Recorder
-    ) -> None:
+    async def test_max_retries_abandons(self, tmp_path: Path, recorder: Recorder) -> None:
         ctx = make_ctx(tmp_path, hooks=recorder.hooks())
         edit_file = build_agent_tools(ctx)[3]
         for _ in range(2):
@@ -185,9 +185,7 @@ class TestEditFileQuestion:
         assert len(recorder.warnings) == 1
         assert len(recorder.questions) == 1
 
-    async def test_need_explanation_enforced(
-        self, tmp_path: Path, recorder: Recorder
-    ) -> None:
+    async def test_need_explanation_enforced(self, tmp_path: Path, recorder: Recorder) -> None:
         ctx = make_ctx(tmp_path, hooks=recorder.hooks(), need_explanation=True)
         edit_file = build_agent_tools(ctx)[3]
         result = await edit_file.coroutine(
@@ -202,27 +200,33 @@ class TestEditFileQuestion:
         )
         assert "已保存" in ok
 
-    async def test_seq_mismatch_with_filename(
-        self, tmp_path: Path, recorder: Recorder
-    ) -> None:
-        """文件名 001.json 里写 seq=2：按文件名落盘，内容按原样校验通过。"""
+    async def test_seq_mismatch_with_filename(self, tmp_path: Path, recorder: Recorder) -> None:
+        """文件名 001.json 里写 seq=2：判定为校验失败，不落盘。"""
         ctx = make_ctx(tmp_path, hooks=recorder.hooks())
         edit_file = build_agent_tools(ctx)[3]
         result = await edit_file.coroutine(
             path="questions/001.json", old_string="", new_string=question_json(2)
         )
-        assert "已保存" in result
-        stored = json.loads(await ctx.workspace.read("questions/001.json"))
-        assert stored["seq"] == 2
+        assert "校验失败" in result and "不一致" in result
+        assert not await ctx.workspace.exists("questions/001.json")
+        assert recorder.questions == []
+
+    async def test_non_standard_question_name_rejected(self, tmp_path: Path) -> None:
+        """questions/ 下非 NNN.json 命名直接拒绝，不落盘。"""
+        ctx = make_ctx(tmp_path)
+        edit_file = build_agent_tools(ctx)[3]
+        result = await edit_file.coroutine(
+            path="questions/1.json", old_string="", new_string=question_json(1)
+        )
+        assert "命名非法" in result
+        assert not await ctx.workspace.exists("questions/1.json")
 
 
 class TestEditFilePlain:
     async def test_create_and_replace(self, tmp_path: Path) -> None:
         ctx = make_ctx(tmp_path)
         edit_file = build_agent_tools(ctx)[3]
-        created = await edit_file.coroutine(
-            path="notes/draft.md", old_string="", new_string="v1"
-        )
+        created = await edit_file.coroutine(path="notes/draft.md", old_string="", new_string="v1")
         assert "已创建" in created
         replaced = await edit_file.coroutine(
             path="notes/draft.md", old_string="v1", new_string="v2"
@@ -243,9 +247,7 @@ class TestSearchKnowledge:
         search = build_agent_tools(ctx)[4]
         assert "知识库为空" in await search.coroutine(query="导数")
 
-    async def test_returns_formatted_chunks(
-        self, tmp_path: Path, recorder: Recorder
-    ) -> None:
+    async def test_returns_formatted_chunks(self, tmp_path: Path, recorder: Recorder) -> None:
         store = StubStore(
             chunks=[
                 {"text": "导数定义……", "source_type": "book", "page": 3, "similarity": 0.91},
@@ -314,19 +316,17 @@ class TestKnowledgeFilter:
     def test_shared_flag_present(self, tmp_path: Path) -> None:
         from app.agents.tools import _knowledge_filter
 
-        expr = _knowledge_filter(
-            make_ctx(tmp_path, school_id=uuid4(), course_id=uuid4())
-        )
+        expr = _knowledge_filter(make_ctx(tmp_path, school_id=uuid4(), course_id=uuid4()))
         branch = expr["or"][0]["and"]
         assert {"eq": {"is_shared": True}} in branch
 
 
 class TestLoadSkill:
-    async def test_load_real_skill(self, tmp_path: Path) -> None:
+    async def test_load_installed_skill(self, tmp_path: Path) -> None:
         ctx = make_ctx(tmp_path)
         load_skill = build_agent_tools(ctx)[5]
         result = await load_skill.coroutine(name="exam-authoring")
-        assert "questions/NNN.json" in result or "题" in result
+        assert "questions/NNN.json" in result
 
     async def test_load_unknown_becomes_text(self, tmp_path: Path) -> None:
         ctx = make_ctx(tmp_path)
@@ -347,3 +347,11 @@ class TestFinalize:
         assert len(recorder.warnings) == 1
         assert result.completed_normally is True
         assert [t.seq for t in result.plan_items] == [1, 2]
+
+    async def test_skips_non_standard_names(self, tmp_path: Path, recorder: Recorder) -> None:
+        """finalize 跳过不符合 questions/NNN.json 命名的文件并告警。"""
+        ctx = make_ctx(tmp_path, hooks=recorder.hooks())
+        await ctx.workspace.write("questions/extra.json", question_json(1))
+        result = await finalize(ctx, intent=None)
+        assert result.questions == []
+        assert len(recorder.warnings) == 1
