@@ -30,9 +30,7 @@ class TestPaths:
         with pytest.raises(WorkspaceError, match="非法的工作区路径"):
             await workspace.write(bad, "x")
 
-    async def test_path_confined_to_prefix(
-        self, workspace: Workspace, tmp_path: Path
-    ) -> None:
+    async def test_path_confined_to_prefix(self, workspace: Workspace, tmp_path: Path) -> None:
         await workspace.write("materials/a.md", "hi")
         assert (tmp_path / "jobs/j1/agent/materials/a.md").exists()
 
@@ -74,9 +72,7 @@ class TestEdit:
 
     async def test_replace_unique_match(self, workspace: Workspace) -> None:
         await workspace.write("doc.md", "alpha beta alpha gamma")
-        result = await workspace.edit(
-            "doc.md", old_string="alpha beta", new_string="ALPHA"
-        )
+        result = await workspace.edit("doc.md", old_string="alpha beta", new_string="ALPHA")
         assert result.created is False
         assert result.content == "ALPHA alpha gamma"
 

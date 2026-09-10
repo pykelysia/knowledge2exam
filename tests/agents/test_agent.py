@@ -116,31 +116,98 @@ class TestRunExamAgent:
         await ws.write("materials/past_paper_01.md", "往期试卷全文")
         await ws.write("materials/keypoints.md", "重点：导数")
 
-        fake = FakeToolModel(responses=[
-            AIMessage(content="", tool_calls=[tool_call(
-                "read_file", {"path": "materials/past_paper_01.md"}, "c1")]),
-            AIMessage(content="", tool_calls=[tool_call(
-                "load_skill", {"name": "exam-authoring"}, "c2")]),
-            AIMessage(content="", tool_calls=[tool_call("todo_write", {"todos": [
-                {"seq": 1, "question_type": "choice", "knowledge_point": "导数"},
-                {"seq": 2, "question_type": "blank", "knowledge_point": "极限"},
-            ]}, "c3")]),
-            AIMessage(content="", tool_calls=[tool_call("edit_file", {
-                "path": "questions/001.json", "old_string": "",
-                "new_string": make_question(1)}, "c4")]),
-            AIMessage(content="", tool_calls=[tool_call("edit_file", {
-                "path": "questions/002.json", "old_string": "",
-                "new_string": "not-json"}, "c5")]),
-            AIMessage(content="", tool_calls=[tool_call("edit_file", {
-                "path": "questions/002.json", "old_string": "",
-                "new_string": make_question(2, question_type="blank",
-                                            options=None,
-                                            stem="1+1=______", answer="2")}, "c6")]),
-            AIMessage(content="", tool_calls=[tool_call("check_todo", {}, "c7")]),
-            AIMessage(content="", tool_calls=[tool_call("AgentSummary", {
-                "total_questions": 2, "abandoned_count": 0,
-                "summary": "两题完成"}, "c8")]),
-        ])
+        fake = FakeToolModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        tool_call("read_file", {"path": "materials/past_paper_01.md"}, "c1")
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[tool_call("load_skill", {"name": "exam-authoring"}, "c2")],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        tool_call(
+                            "todo_write",
+                            {
+                                "todos": [
+                                    {
+                                        "seq": 1,
+                                        "question_type": "choice",
+                                        "knowledge_point": "导数",
+                                    },
+                                    {"seq": 2, "question_type": "blank", "knowledge_point": "极限"},
+                                ]
+                            },
+                            "c3",
+                        )
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        tool_call(
+                            "edit_file",
+                            {
+                                "path": "questions/001.json",
+                                "old_string": "",
+                                "new_string": make_question(1),
+                            },
+                            "c4",
+                        )
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        tool_call(
+                            "edit_file",
+                            {
+                                "path": "questions/002.json",
+                                "old_string": "",
+                                "new_string": "not-json",
+                            },
+                            "c5",
+                        )
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        tool_call(
+                            "edit_file",
+                            {
+                                "path": "questions/002.json",
+                                "old_string": "",
+                                "new_string": make_question(
+                                    2,
+                                    question_type="blank",
+                                    options=None,
+                                    stem="1+1=______",
+                                    answer="2",
+                                ),
+                            },
+                            "c6",
+                        )
+                    ],
+                ),
+                AIMessage(content="", tool_calls=[tool_call("check_todo", {}, "c7")]),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        tool_call(
+                            "AgentSummary",
+                            {"total_questions": 2, "abandoned_count": 0, "summary": "两题完成"},
+                            "c8",
+                        )
+                    ],
+                ),
+            ]
+        )
         monkeypatch.setattr(agent_module, "get_chat_model", lambda: fake)
 
         recorder = Recorder()
@@ -200,19 +267,60 @@ class TestRunExamAgent:
     ) -> None:
         """无材料时系统提示词提示（无材料），循环仍可完成。"""
 
-        fake = FakeToolModel(responses=[
-            AIMessage(content="", tool_calls=[tool_call("todo_write", {"todos": [
-                {"seq": 1, "question_type": "short_answer", "knowledge_point": "中值定理"},
-            ]}, "c1")]),
-            AIMessage(content="", tool_calls=[tool_call("edit_file", {
-                "path": "questions/001.json", "old_string": "",
-                "new_string": json.dumps({
-                    "seq": 1, "question_type": "short_answer",
-                    "stem": "证明拉格朗日中值定理", "answer": "略",
-                }, ensure_ascii=False)}, "c2")]),
-            AIMessage(content="", tool_calls=[tool_call("AgentSummary", {
-                "total_questions": 1, "abandoned_count": 0, "summary": "ok"}, "c3")]),
-        ])
+        fake = FakeToolModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        tool_call(
+                            "todo_write",
+                            {
+                                "todos": [
+                                    {
+                                        "seq": 1,
+                                        "question_type": "short_answer",
+                                        "knowledge_point": "中值定理",
+                                    },
+                                ]
+                            },
+                            "c1",
+                        )
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        tool_call(
+                            "edit_file",
+                            {
+                                "path": "questions/001.json",
+                                "old_string": "",
+                                "new_string": json.dumps(
+                                    {
+                                        "seq": 1,
+                                        "question_type": "short_answer",
+                                        "stem": "证明拉格朗日中值定理",
+                                        "answer": "略",
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            },
+                            "c2",
+                        )
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        tool_call(
+                            "AgentSummary",
+                            {"total_questions": 1, "abandoned_count": 0, "summary": "ok"},
+                            "c3",
+                        )
+                    ],
+                ),
+            ]
+        )
         monkeypatch.setattr(agent_module, "get_chat_model", lambda: fake)
         recorder = Recorder()
         result = await run_exam_agent(job_env._job_id, {}, recorder.hooks())

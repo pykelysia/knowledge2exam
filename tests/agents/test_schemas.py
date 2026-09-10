@@ -52,9 +52,7 @@ class TestExamQuestion:
             ExamQuestion.model_validate(data)
 
     def test_choice_extra_option(self) -> None:
-        data = choice_question(
-            options={"A": "a", "B": "b", "C": "c", "D": "d", "E": "e"}
-        )
+        data = choice_question(options={"A": "a", "B": "b", "C": "c", "D": "d", "E": "e"})
         with pytest.raises(ValidationError, match="多余选项"):
             ExamQuestion.model_validate(data)
 
@@ -75,9 +73,7 @@ class TestExamQuestion:
             ExamQuestion.model_validate(choice_question(question_type="essay"))
 
     def test_sub_only_on_short_answer(self) -> None:
-        data = choice_question(
-            sub_questions=["x"], sub_answers=["y"]
-        )
+        data = choice_question(sub_questions=["x"], sub_answers=["y"])
         with pytest.raises(ValidationError, match="只有简答题"):
             ExamQuestion.model_validate(data)
 
