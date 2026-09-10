@@ -64,7 +64,10 @@ async def persist_exam_result(
     abandoned = len(result.abandoned_seqs)
     logger.info(
         "agent 产物入库完成（job=%s）：plan=%d question=%d abandoned=%d",
-        job_id, len(plan_by_seq), total, abandoned,
+        job_id,
+        len(plan_by_seq),
+        total,
+        abandoned,
     )
     return {
         "total_plan_items": len(plan_by_seq),
