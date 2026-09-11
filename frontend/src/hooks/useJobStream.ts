@@ -65,7 +65,6 @@ export function useJobStream({ jobId, onEvent }: UseJobStreamOptions) {
       'question_retried',
       'question_replanned',
       'question_abandoned',
-      'review_result',
       'warning',
       'done',
       'error',

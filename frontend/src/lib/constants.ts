@@ -39,9 +39,7 @@ export const ALLOWED_EXTENSIONS = [
 export const JOB_STATUS_META: Record<JobStatus, { label: string; variant: 'default' | 'success' | 'warning' | 'danger' }> = {
   pending: { label: '排队中', variant: 'default' },
   preprocessing: { label: '预处理', variant: 'default' },
-  planning: { label: '规划中', variant: 'default' },
   generating: { label: '出题中', variant: 'default' },
-  reviewing: { label: '审查中', variant: 'default' },
   rendering: { label: '渲染中', variant: 'default' },
   completed: { label: '已完成', variant: 'success' },
   partially_completed: { label: '部分完成', variant: 'warning' },
@@ -73,6 +71,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
   PLANNING_FAILED: '规划阶段失败，建议补充资料后重试',
   GENERATION_EXHAUSTED: '题目生成耗尽重试，建议减少时长或补充资料',
   RENDER_FAILED: 'PDF 渲染失败，可下载 md 作为替代',
+  PIPELINE_FAILED: '任务执行失败，请查看任务日志或稍后重试',
 }
 
 /** 将任意错误码映射为可展示的中文提示。 */

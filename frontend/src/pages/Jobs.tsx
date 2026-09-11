@@ -148,7 +148,7 @@ export function Jobs() {
                       查看
                     </Button>
                   </Link>
-                  {['pending', 'preprocessing', 'planning', 'generating', 'reviewing', 'rendering'].includes(
+                  {['pending', 'preprocessing', 'generating', 'rendering'].includes(
                     job.status,
                   ) && (
                     <>

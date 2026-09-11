@@ -47,7 +47,6 @@ export function Dashboard() {
   const [extraRequirement, setExtraRequirement] = useState('')
   const [duration, setDuration] = useState(100)
   const [needExplanation, setNeedExplanation] = useState(true)
-  const [enableReview, setEnableReview] = useState(false)
 
   // 学校 / 课程（FR-5）
   const [schools, setSchools] = useState<School[]>([])
@@ -218,7 +217,6 @@ export function Dashboard() {
         course_id: anyShareable ? courseId : null,
         duration_minutes: duration,
         need_explanation: needExplanation,
-        enable_review: enableReview,
       })
 
       // 记录到本地历史，供任务列表页使用。
@@ -462,7 +460,7 @@ export function Dashboard() {
             <CardTitle>生成选项</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div>
                 <Label htmlFor="duration">考试时长（分钟）</Label>
                 <Input
@@ -481,14 +479,6 @@ export function Dashboard() {
                   onChange={(e) => setNeedExplanation(e.target.checked)}
                 />
                 生成答案解析
-              </label>
-              <label className="flex items-center gap-2 pt-6 text-sm text-slate-700">
-                <input
-                  type="checkbox"
-                  checked={enableReview}
-                  onChange={(e) => setEnableReview(e.target.checked)}
-                />
-                启用审查阶段
               </label>
             </div>
           </CardContent>

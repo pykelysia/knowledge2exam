@@ -73,7 +73,6 @@ export interface JobCreate {
   course_id?: string | null
   duration_minutes?: number
   need_explanation?: boolean
-  enable_review?: boolean
 }
 
 export interface JobAccepted {
@@ -115,9 +114,7 @@ export interface Artifacts {
 export type JobStatus =
   | 'pending'
   | 'preprocessing'
-  | 'planning'
   | 'generating'
-  | 'reviewing'
   | 'rendering'
   | 'completed'
   | 'partially_completed'
@@ -126,9 +123,7 @@ export type JobStatus =
 
 export type Stage =
   | 'preprocessing'
-  | 'planning'
   | 'generating'
-  | 'reviewing'
   | 'rendering'
 
 export interface Job {
@@ -137,7 +132,6 @@ export interface Job {
   stage?: Stage
   duration_minutes?: number
   need_explanation?: boolean
-  enable_review?: boolean
   plan?: Plan
   progress?: Progress
   warnings?: Warning[]
@@ -235,7 +229,6 @@ export type JobEventType =
   | 'question_retried'
   | 'question_replanned'
   | 'question_abandoned'
-  | 'review_result'
   | 'warning'
   | 'done'
   | 'error'
@@ -281,13 +274,6 @@ export interface QuestionAbandonedData {
   reason: string
 }
 
-export interface ReviewResultData {
-  checked: number
-  passed: number
-  rejected: Array<{ seq: number; reason: RetryReason }>
-  auto_fixed: Array<{ seq: number; reason: RetryReason }>
-}
-
 export interface WarningData {
   code: 'PARSE_FAILED' | 'MODERATION_REJECTED'
   upload_id?: string | null
@@ -295,7 +281,7 @@ export interface WarningData {
 }
 
 export interface DoneData {
-  status: 'completed' | 'partially_completed'
+  status: 'completed' | 'partially_completed' | 'failed' | 'cancelled'
   total: number
   abandoned: number
   md_url?: string | null
@@ -315,7 +301,6 @@ export type JobEventData =
   | QuestionRetriedData
   | QuestionReplannedData
   | QuestionAbandonedData
-  | ReviewResultData
   | WarningData
   | DoneData
   | ErrorData

@@ -8,15 +8,22 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
-import type { Job, JobEventData, JobEventType, Question, ReviewResultData } from '@/api/types'
+import type { Job, JobEventData, JobEventType, Question } from '@/api/types'
 
 const STAGE_LABEL: Record<string, string> = {
   preprocessing: '预处理',
+  // planning / reviewing 为历史任务的 SSE 回放兼容标签（旧 job_stage 行仍含这些值）
   planning: '规划',
   generating: '出题',
   reviewing: '审查',
   rendering: '渲染',
 }
+
+/** 可取消任务的运行态。 */
+const CANCELLABLE_STATUSES = ['pending', 'preprocessing', 'generating', 'rendering']
+
+/** 已进入出题、可列出题目的状态。 */
+const QUESTION_VISIBLE_STATUSES = ['generating', 'rendering', 'completed', 'partially_completed']
 
 export function JobDetail() {
   const { jobId } = useParams<{ jobId: string }>()
@@ -24,7 +31,6 @@ export function JobDetail() {
   const [questions, setQuestions] = useState<Question[]>([])
   const [error, setError] = useState<string | null>(null)
   const [logs, setLogs] = useState<string[]>([])
-  const [reviewResult, setReviewResult] = useState<ReviewResultData | null>(null)
   const timerRef = useRef<number | null>(null)
 
   // 轮询降级 + 初始快照。
@@ -87,12 +93,6 @@ export function JobDetail() {
           setLogs((prev) => [...prev, `第 ${d.seq} 题已放弃`])
           break
         }
-        case 'review_result': {
-          const d = data as Extract<JobEventData, { checked: number; passed: number }>
-          setLogs((prev) => [...prev, `审查完成：${d.passed}/${d.checked} 通过`])
-          setReviewResult(d as ReviewResultData)
-          break
-        }
         case 'warning': {
           const d = data as Extract<JobEventData, { message: string }>
           setLogs((prev) => [...prev, `⚠ ${d.message}`])
@@ -129,7 +129,7 @@ export function JobDetail() {
   }, [job?.status, jobId, job])
   useEffect(() => {
     if (!jobId || !job) return
-    if (job.status === 'generating' || job.status === 'reviewing' || job.status === 'rendering' || job.status === 'completed' || job.status === 'partially_completed') {
+    if (QUESTION_VISIBLE_STATUSES.includes(job.status)) {
       listQuestions(jobId)
         .then((res) => setQuestions(res.questions))
         .catch(() => {})
@@ -197,9 +197,7 @@ export function JobDetail() {
         </div>
         <div className="flex items-center gap-3">
           <Badge variant={statusMeta.variant}>{statusMeta.label}</Badge>
-          {['pending', 'preprocessing', 'planning', 'generating', 'reviewing', 'rendering'].includes(
-            job.status,
-          ) && (
+          {CANCELLABLE_STATUSES.includes(job.status) && (
             <Button variant="secondary" size="sm" onClick={handleCancel}>
               取消
             </Button>
@@ -289,45 +287,15 @@ export function JobDetail() {
         </CardContent>
       </Card>
 
-      {/* 审查结果 */}
-      {reviewResult && (
-        <Card>
-          <CardHeader>
-            <CardTitle>审查结果</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <div className="flex items-center gap-4 text-sm">
-              <span className="text-slate-600">
-                共审查 <span className="font-medium">{reviewResult.checked}</span> 题，
-                通过 <span className="font-medium text-emerald-600">{reviewResult.passed}</span> 题
-              </span>
-            </div>
-            {(reviewResult.rejected?.length ?? 0) > 0 && (
-              <div>
-                <p className="text-sm font-medium text-red-700">被拒绝：</p>
-                <ul className="mt-1 list-inside list-disc text-sm text-red-600">
-                  {reviewResult.rejected.map((r, i) => (
-                    <li key={i}>第 {r.seq} 题 — {r.reason}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
-            {(reviewResult.auto_fixed?.length ?? 0) > 0 && (
-              <div>
-                <p className="text-sm font-medium text-amber-700">自动修复：</p>
-                <ul className="mt-1 list-inside list-disc text-sm text-amber-600">
-                  {reviewResult.auto_fixed.map((r, i) => (
-                    <li key={i}>第 {r.seq} 题 — {r.reason}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
-          </CardContent>
-        </Card>
+      {/* 失败提示 */}
+      {job.status === 'failed' && job.error_code && (
+        <div className="rounded-md border border-red-200 bg-red-50 p-4 text-red-700">
+          {errorMessage(job.error_code)}
+        </div>
       )}
 
       {/* 已产出题目 */}
-      {(job.status === 'generating' || job.status === 'reviewing' || job.status === 'rendering' || job.status === 'completed' || job.status === 'partially_completed') && (
+      {QUESTION_VISIBLE_STATUSES.includes(job.status) && (
         <Card>
           <CardHeader>
             <CardTitle>已产出的题目（{questions.length}）</CardTitle>
