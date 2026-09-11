@@ -1,7 +1,7 @@
 """统一错误体系。
 
-`ErrorCode` 全集见 [api.md](../../docs/api.md#11-错误码) 第 11 节，包含仅作为
-warning / error 事件出现、无 HTTP 状态的码（如 `PARSE_FAILED`、`PLANNING_FAILED`）。
+`ErrorCode` 全集见 [openapi.yaml](../../docs/openapi.yaml) 的 ErrorCode 枚举，包含仅作为
+warning / error 事件出现、无 HTTP 状态的码（如 `PARSE_FAILED`、`PIPELINE_FAILED`）。
 有 HTTP 状态的码在此映射到对应状态码，供全局异常处理器转换为统一 `ErrorResponse`。
 """
 

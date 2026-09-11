@@ -1,7 +1,7 @@
 """文档解析抽象接口。
 
 首版 stub：不真正解析 docx/pptx/pdf，仅返回基于文本长度的模拟预览。
-真实实现（PyMuPDF / python-docx / python-pptx，见 tech-selection.md 第 1 节）
+真实实现（PyMuPDF / python-docx / python-pptx）
 后续在此接入。
 """
 
@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-# 允许的文件扩展名（prd.md 第 2 节）
+# 允许的文件扩展名
 SUPPORTED_EXTENSIONS = {
     ".docx",
     ".doc",

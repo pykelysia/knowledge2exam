@@ -6,7 +6,7 @@ from enum import StrEnum
 
 
 class SourceType(StrEnum):
-    """内容类型全集，取值见 docs/README.md 术语表。"""
+    """内容类型全集（文件类 + 手动输入文本类）。"""
 
     book = "book"
     lecture = "lecture"
