@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     agent_temperature: float = 0.7
     agent_recursion_limit: int = 100  # ReAct 循环最大步数，防止失控
     agent_max_retries: int = 3  # 单题校验失败重试上限，超过则放弃该题
+    agent_max_render_retries: int = 3  # 整卷 PDF 渲染失败重试上限（独立于单题校验重试）
 
     # Skill system（ReAct agent 的技能目录）
     skills_dir: Path = Path("./skills")
