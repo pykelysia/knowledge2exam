@@ -33,13 +33,16 @@ _NON_TERMINAL_STATUSES = (
 
 
 def upgrade() -> None:
+    # 状态值均为硬编码常量，内联字面量以兼容 offline --sql 渲染
+    # （expanding bindparam 无法被 literal 渲染器序列化）。
+    statuses_sql = ", ".join(f"'{s}'" for s in _NON_TERMINAL_STATUSES)
     op.execute(
         sa.text(
             "UPDATE job SET status = 'failed', "
             "error_code = COALESCE(error_code, 'PIPELINE_FAILED'), "
             "finished_at = COALESCE(finished_at, now()) "
-            "WHERE status IN :statuses"
-        ).bindparams(sa.bindparam("statuses", value=list(_NON_TERMINAL_STATUSES)))
+            f"WHERE status IN ({statuses_sql})"
+        )
     )
     op.drop_column('job', 'enable_review')
 
