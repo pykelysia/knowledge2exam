@@ -19,7 +19,7 @@ export const FILE_SOURCE_TYPES = (
   Object.keys(SOURCE_TYPE_META) as SourceType[]
 ).filter((t) => SOURCE_TYPE_META[t].fileOnly)
 
-/** 允许上传的文件扩展名（prd.md 第 2 节）。 */
+/** 允许上传的文件扩展名。 */
 export const ALLOWED_EXTENSIONS = [
   'docx',
   'doc',
@@ -47,7 +47,7 @@ export const JOB_STATUS_META: Record<JobStatus, { label: string; variant: 'defau
   cancelled: { label: '已取消', variant: 'default' },
 }
 
-/** 错误码中文提示（api.md 第 11 节「前端建议动作」）。 */
+/** 错误码中文提示。 */
 export const ERROR_MESSAGES: Record<string, string> = {
   INPUT_EMPTY: '请至少提供一项输入（文件或文本）',
   UNSUPPORTED_FORMAT: '不支持的文件格式',
@@ -60,6 +60,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
   UPLOAD_IN_USE: '该上传件已被任务引用，不可删除',
   JOB_NOT_READY: '产物尚未生成，请稍后再试',
   JOB_ALREADY_FINISHED: '任务已终结，无法取消',
+  PARSE_FAILED: '资料解析失败，对应内容将被跳过',
+  MODERATION_REJECTED: '内容安全审核未通过',
   MODEL_UNAVAILABLE: '模型服务不可用，请稍后重试',
   RATE_LIMITED: '请求过于频繁，请稍后重试',
   USER_EXISTS: '邮箱或用户名已被注册',
@@ -71,6 +73,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
   PLANNING_FAILED: '规划阶段失败，建议补充资料后重试',
   GENERATION_EXHAUSTED: '题目生成耗尽重试，建议减少时长或补充资料',
   RENDER_FAILED: 'PDF 渲染失败，可下载 md 作为替代',
+  AGENT_WARNING: '生成过程告警，请留意任务日志',
   PIPELINE_FAILED: '任务执行失败，请查看任务日志或稍后重试',
 }
 

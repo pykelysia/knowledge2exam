@@ -11,7 +11,7 @@ interface UseJobStreamOptions {
 }
 
 /**
- * 订阅任务 SSE 进度流（FR-10）。
+ * 订阅任务 SSE 进度流。
  * 用原生 EventSource 读取，因为 axios 不解析流式响应。
  * 断连后依赖浏览器自动重连；Last-Event-ID 由 EventSource 在重连时自动携带。
  */
@@ -62,9 +62,6 @@ export function useJobStream({ jobId, onEvent }: UseJobStreamOptions) {
       'stage_changed',
       'plan_ready',
       'question_completed',
-      'question_retried',
-      'question_replanned',
-      'question_abandoned',
       'warning',
       'done',
       'error',

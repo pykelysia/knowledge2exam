@@ -24,7 +24,7 @@ export function Login() {
     setError(null)
     setSubmitting(true)
     try {
-      // 账号字段含 @ 视为邮箱，否则视为用户名（api.md：email 优先）。
+      // 账号字段含 @ 视为邮箱，否则视为用户名（email 优先）。
       const isEmail = account.includes('@')
       await login({
         email: isEmail ? account : null,

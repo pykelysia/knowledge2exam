@@ -1,7 +1,7 @@
 import axios, { AxiosError, type InternalAxiosRequestConfig } from 'axios'
 import type { ErrorResponse } from '@/api/types'
 
-// 所有端点前缀 /api/v1（api.md 第 1 节）。开发环境经 Vite 代理转发（见 vite.config.ts）。
+// 所有端点前缀 /api/v1。开发环境经 Vite 代理转发（见 vite.config.ts）。
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1'
 
 export const client = axios.create({

@@ -78,21 +78,6 @@ export function JobDetail() {
           setLogs((prev) => [...prev, `完成第 ${d.seq} 题（${d.completed}/${d.total}）`])
           break
         }
-        case 'question_retried': {
-          const d = data as Extract<JobEventData, { seq: number; attempt: number }>
-          setLogs((prev) => [...prev, `第 ${d.seq} 题重试（第 ${d.attempt} 次）`])
-          break
-        }
-        case 'question_replanned': {
-          const d = data as Extract<JobEventData, { seq: number }>
-          setLogs((prev) => [...prev, `第 ${d.seq} 题已更换考察方向`])
-          break
-        }
-        case 'question_abandoned': {
-          const d = data as Extract<JobEventData, { seq: number }>
-          setLogs((prev) => [...prev, `第 ${d.seq} 题已放弃`])
-          break
-        }
         case 'warning': {
           const d = data as Extract<JobEventData, { message: string }>
           setLogs((prev) => [...prev, `⚠ ${d.message}`])

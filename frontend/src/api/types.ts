@@ -1,5 +1,5 @@
 // 与 docs/openapi.yaml 的 components/schemas 严格对应。
-// source_type / 错误码等枚举见 docs/README.md 术语表与 api.md 第 11 节。
+// source_type / 错误码等枚举以后端 app/core（enums / exceptions）为准。
 
 /** 全部内容类型（含手动输入） */
 export type SourceType =
@@ -101,7 +101,7 @@ export interface Progress {
 }
 
 export interface Warning {
-  code: 'PARSE_FAILED' | 'MODERATION_REJECTED'
+  code: 'PARSE_FAILED' | 'AGENT_WARNING' | 'RENDER_FAILED'
   upload_id?: string | null
   message?: string
 }
@@ -204,6 +204,8 @@ export type ErrorCode =
   | 'PLANNING_FAILED'
   | 'GENERATION_EXHAUSTED'
   | 'RENDER_FAILED'
+  | 'AGENT_WARNING'
+  | 'PIPELINE_FAILED'
   | 'MODEL_UNAVAILABLE'
   | 'RATE_LIMITED'
   | 'USER_EXISTS'
@@ -220,15 +222,12 @@ export interface ErrorResponse {
 }
 
 // ---- SSE 事件 ----
-// 见 api.md 第 6 节。每帧含 id（seq）、event、data。
+// 事件结构见 docs/openapi.yaml 的 /jobs/{job_id}/events 端点描述。每帧含 id（seq）、event、data。
 
 export type JobEventType =
   | 'stage_changed'
   | 'plan_ready'
   | 'question_completed'
-  | 'question_retried'
-  | 'question_replanned'
-  | 'question_abandoned'
   | 'warning'
   | 'done'
   | 'error'
@@ -236,13 +235,12 @@ export type JobEventType =
 export interface StageChangedData {
   stage: Stage
   previous?: Stage
-  at?: string
 }
 
 export interface PlanReadyData {
   total: number
   distribution: PlanDistribution
-  reference_used: 'past_paper' | 'shared_past_paper' | 'default_template'
+  reference_used: 'agent_planning'
   duration_minutes?: number
 }
 
@@ -253,40 +251,18 @@ export interface QuestionCompletedData {
   total: number
 }
 
-export type RetryReason = 'violation' | 'deviation' | 'schema_invalid' | 'latex_unrenderable'
-
-export interface QuestionRetriedData {
-  seq: number
-  attempt: number
-  reason: RetryReason
-  counted: boolean
-}
-
-export interface QuestionReplannedData {
-  seq: number
-  old_plan_item_id: string
-  new_plan_item_id: string
-  reason: string
-}
-
-export interface QuestionAbandonedData {
-  seq: number
-  reason: string
-}
-
 export interface WarningData {
-  code: 'PARSE_FAILED' | 'MODERATION_REJECTED'
+  code: 'PARSE_FAILED' | 'AGENT_WARNING' | 'RENDER_FAILED'
   upload_id?: string | null
   message: string
 }
 
 export interface DoneData {
   status: 'completed' | 'partially_completed' | 'failed' | 'cancelled'
-  total: number
-  abandoned: number
+  total?: number
+  abandoned?: number
   md_url?: string | null
   pdf_url?: string | null
-  note?: string
 }
 
 export interface ErrorData {
@@ -298,9 +274,6 @@ export type JobEventData =
   | StageChangedData
   | PlanReadyData
   | QuestionCompletedData
-  | QuestionRetriedData
-  | QuestionReplannedData
-  | QuestionAbandonedData
   | WarningData
   | DoneData
   | ErrorData
