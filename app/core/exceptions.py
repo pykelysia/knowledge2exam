@@ -22,6 +22,7 @@ class ErrorCode(StrEnum):
     INVALID_DURATION = "INVALID_DURATION"
     # 资源与任务
     JOB_NOT_FOUND = "JOB_NOT_FOUND"
+    SCHOOL_NOT_FOUND = "SCHOOL_NOT_FOUND"
     UPLOAD_IN_USE = "UPLOAD_IN_USE"
     JOB_NOT_READY = "JOB_NOT_READY"
     JOB_ALREADY_FINISHED = "JOB_ALREADY_FINISHED"
@@ -33,6 +34,7 @@ class ErrorCode(StrEnum):
     RENDER_FAILED = "RENDER_FAILED"
     AGENT_WARNING = "AGENT_WARNING"
     PIPELINE_FAILED = "PIPELINE_FAILED"
+    SERVER_RESTARTED = "SERVER_RESTARTED"
     # 服务
     MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE"
     RATE_LIMITED = "RATE_LIMITED"
@@ -56,6 +58,7 @@ _ERROR_CODE_HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.SHARE_SCOPE_REQUIRED: 400,
     ErrorCode.INVALID_DURATION: 400,
     ErrorCode.JOB_NOT_FOUND: 404,
+    ErrorCode.SCHOOL_NOT_FOUND: 404,
     ErrorCode.UPLOAD_IN_USE: 409,
     ErrorCode.JOB_NOT_READY: 409,
     ErrorCode.JOB_ALREADY_FINISHED: 409,
@@ -135,6 +138,11 @@ class UserExists(AppException):
 class JobNotFound(AppException):
     def __init__(self) -> None:
         super().__init__(ErrorCode.JOB_NOT_FOUND, "任务不存在或无权访问")
+
+
+class SchoolNotFound(AppException):
+    def __init__(self) -> None:
+        super().__init__(ErrorCode.SCHOOL_NOT_FOUND, "学校不存在")
 
 
 class UploadNotFound(AppException):

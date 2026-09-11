@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 import pytest
@@ -9,7 +10,7 @@ import pytest
 from app.agents.schemas import ExamResult
 from app.orchestration import stages as stages_module
 from app.orchestration.events import EventBus
-from app.orchestration.stages import _run_real_pipeline
+from app.orchestration.stages import _run_pipeline_with_cancellation, _run_real_pipeline
 from tests.orchestration.helpers import FakeJob, FakeSession
 
 # app/agents 的 context 契约键（守护接口不漂移）
@@ -136,3 +137,35 @@ async def test_md_only_result_ends_partially_completed(fakes, monkeypatch) -> No
     assert job.pdf_key is None
     warnings = session.events("warning")
     assert any(w.payload.get("code") == "RENDER_FAILED" for w in warnings)
+
+
+async def test_status_conflict_aborts_pipeline(fakes, monkeypatch) -> None:
+    """状态被并发修改（如取消）时：_advance_status 抛冲突，管线停止推进。"""
+    from app.orchestration.stages import JobStateConflict
+
+    job = FakeJob(status="pending")
+    session = FakeSession(job)
+    session.next_execute_rowcount = 0  # 模拟 UPDATE 无命中
+    bus = EventBus(session)
+
+    with pytest.raises(JobStateConflict):
+        await _run_real_pipeline(session, job, bus)
+
+    # 未推进到 preprocessing，也没有 generating 及之后的产物提交
+    assert job.status == "pending"
+    assert [s.payload.get("stage") for s in session.events("stage_changed")] == []
+
+
+async def test_pipeline_with_cancellation_swallows_conflict(
+    fakes, monkeypatch, caplog
+) -> None:
+    """冲突冒泡到 _run_pipeline_with_cancellation 时安静收尾，不覆盖状态。"""
+    from app.orchestration.stages import JobStateConflict
+
+    async def conflict_runner(job_id):  # noqa: ANN001
+        raise JobStateConflict("状态已被并发修改")
+
+    monkeypatch.setattr(stages_module, "run_pipeline", conflict_runner)
+
+    # run_pipeline 的异常路径兜底不会把任务打成 failed（冲突单独处理）
+    await _run_pipeline_with_cancellation(uuid.uuid4())

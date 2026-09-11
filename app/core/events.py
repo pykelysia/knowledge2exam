@@ -21,6 +21,10 @@ from app.models.job import JobStage
 # job_id -> 该任务的活跃订阅者队列集合
 _subscribers: dict[uuid.UUID, set[asyncio.Queue]] = defaultdict(set)
 
+# job_id -> seq 生成锁：防止并发 emit 读到同一 max(seq)（撞唯一约束）。
+# 事件总线是进程内的，per-job 锁即可保证 seq 严格单调。
+_seq_locks: dict[uuid.UUID, asyncio.Lock] = defaultdict(asyncio.Lock)
+
 
 def _jsonable(value: Any) -> Any:
     """把 payload 递归转换为 JSON 可序列化结构（UUID/Enum/Path 等）。"""
@@ -50,21 +54,22 @@ class EventBus:
     ) -> int:
         """落盘一条事件，返回其 seq。"""
         data = _jsonable(data)
-        max_seq = await self.db.scalar(
-            select(func.coalesce(func.max(JobStage.seq), 0)).where(JobStage.job_id == job_id)
-        )
-        seq = (max_seq or 0) + 1
-
-        self.db.add(
-            JobStage(
-                job_id=job_id,
-                stage=stage or "",
-                event_type=event_type,
-                payload=data,
-                seq=seq,
+        async with _seq_locks[job_id]:
+            max_seq = await self.db.scalar(
+                select(func.coalesce(func.max(JobStage.seq), 0)).where(JobStage.job_id == job_id)
             )
-        )
-        await self.db.flush()
+            seq = (max_seq or 0) + 1
+
+            self.db.add(
+                JobStage(
+                    job_id=job_id,
+                    stage=stage or "",
+                    event_type=event_type,
+                    payload=data,
+                    seq=seq,
+                )
+            )
+            await self.db.flush()
 
         for q in list(_subscribers.get(job_id, set())):
             q.put_nowait({"seq": seq, "event": event_type, "data": data})

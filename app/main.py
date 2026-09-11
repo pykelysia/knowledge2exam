@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -10,17 +12,59 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import update
 
 from app.api import artifacts, auth, catalog, jobs, uploads
-from app.config import settings
+from app.config import DEFAULT_JWT_SECRET, settings
+from app.core.db import AsyncSessionLocal
 from app.core.exceptions import AppException, ErrorCode
+from app.models.job import Job
+from app.orchestration.state_machine import TERMINAL_STATUSES
 from app.rendering.setup import ensure_pandoc_available
 from app.schemas.common import ErrorResponse
+
+
+async def _recover_interrupted_jobs() -> int:
+    """服务重启后把非终态任务定格为 failed（进程内任务已随重启丢失）。"""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            update(Job)
+            .where(Job.status.not_in([s.value for s in TERMINAL_STATUSES]))
+            .values(
+                status="failed",
+                error_code=ErrorCode.SERVER_RESTARTED.value,
+                finished_at=datetime.now(UTC),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        await db.commit()
+    return result.rowcount
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """启动校验与恢复：JWT 密钥防护、中断任务收敛、渲染依赖检查。"""
+    if not settings.debug_mode and settings.jwt_secret == DEFAULT_JWT_SECRET:
+        raise RuntimeError(
+            "生产环境（DEBUG_MODE=false）必须配置 JWT_SECRET，拒绝使用内置开发密钥启动"
+        )
+
+    recovered = await _recover_interrupted_jobs()
+    if recovered:
+        logging.getLogger(__name__).warning(
+            "服务重启：已将 %d 个非终态任务定格为 failed（SERVER_RESTARTED）", recovered
+        )
+
+    # 渲染依赖缺失时启动报错（渲染期会自动降级 md_only）；安装由部署显式负责
+    ensure_pandoc_available(auto_install=True, raise_on_missing=True)
+    yield
+
 
 app = FastAPI(
     title="knowledge2exam API",
     version="1.0.0",
     description="试卷生成工具后端接口（REST + SSE）。",
+    lifespan=lifespan,
 )
 
 
@@ -59,12 +103,6 @@ app.include_router(uploads.router, prefix=API_PREFIX)
 app.include_router(jobs.router, prefix=API_PREFIX)
 app.include_router(artifacts.router, prefix=API_PREFIX)
 app.include_router(catalog.router, prefix=API_PREFIX)
-
-
-@app.on_event("startup")
-async def _ensure_pandoc() -> None:
-    """启动时强制检查并安装 pandoc。"""
-    ensure_pandoc_available(auto_install=True, raise_on_missing=True)
 
 
 @app.exception_handler(AppException)

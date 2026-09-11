@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents import AgentHooks, run_exam_agent
@@ -39,7 +39,7 @@ from app.models.resource import Resource
 from app.models.upload import Upload
 from app.orchestration.events import EventBus
 from app.orchestration.integration import persist_exam_result
-from app.orchestration.state_machine import JobStatus, Stage, is_terminal
+from app.orchestration.state_machine import TERMINAL_STATUSES, JobStatus, Stage
 from app.retrieval.vector_store import PgVectorStore
 
 logger = logging.getLogger(__name__)
@@ -95,18 +95,48 @@ async def run_pipeline(job_id: uuid.UUID) -> None:
             raise
 
 
+class JobStateConflict(RuntimeError):
+    """任务状态已被并发修改（如取消/失败兜底），管线停止推进。"""
+
+
+async def _advance_status(db: AsyncSession, job: Job, target: JobStatus) -> None:
+    """条件推进任务状态：仅当 DB 中当前状态与 ORM 快照一致时更新。
+
+    防止 cancel/fail 兜底在窗口期写入终态后，被管线用过期对象无条件覆盖。
+    """
+    result = await db.execute(
+        update(Job)
+        .where(Job.id == job.id, Job.status == job.status)
+        .values(status=target.value)
+        .execution_options(synchronize_session=False)
+    )
+    if result.rowcount == 0:
+        raise JobStateConflict(f"job 状态已被并发修改（期望 {job.status}）")
+    job.status = target.value
+
+
 async def _run_pipeline_with_cancellation(job_id: uuid.UUID) -> None:
     """包装 run_pipeline，处理任务注册、取消与意外失败的终态收敛。"""
     try:
         await run_pipeline(job_id)
+    except JobStateConflict:
+        # 状态已被并发推进到终态（取消等）：安静收尾，不覆盖、不告警
+        logger.info("job=%s 状态已被并发修改，管线停止推进", job_id)
+        return
     except asyncio.CancelledError:
-        # 任务被取消：更新数据库状态并通知订阅者
+        # 任务被取消：条件更新数据库状态并通知订阅者（终态已被写入则跳过）
         async with AsyncSessionLocal() as db:
-            job = await db.get(Job, job_id)
-            if job and job.status != JobStatus.cancelled.value:
-                job.status = JobStatus.cancelled.value
-                job.finished_at = datetime.now(UTC)
-                await db.commit()
+            result = await db.execute(
+                update(Job)
+                .where(
+                    Job.id == job_id,
+                    Job.status.not_in([s.value for s in TERMINAL_STATUSES]),
+                )
+                .values(status=JobStatus.cancelled.value, finished_at=datetime.now(UTC))
+                .execution_options(synchronize_session=False)
+            )
+            await db.commit()
+            if result.rowcount:
                 bus = EventBus(db)
                 await bus.emit_and_close(
                     job_id,
@@ -126,14 +156,21 @@ async def _run_pipeline_with_cancellation(job_id: uuid.UUID) -> None:
         )
         try:
             async with AsyncSessionLocal() as db:
-                job = await db.get(Job, job_id)
-                if job and not is_terminal(job.status):
-                    stage_snapshot = job.status  # 事件里标注实际出错阶段
-                    job.status = JobStatus.failed.value
-                    job.error_code = ErrorCode.PIPELINE_FAILED.value
-                    job.finished_at = datetime.now(UTC)
-                    await db.commit()
-
+                result = await db.execute(
+                    update(Job)
+                    .where(
+                        Job.id == job_id,
+                        Job.status.not_in([s.value for s in TERMINAL_STATUSES]),
+                    )
+                    .values(
+                        status=JobStatus.failed.value,
+                        error_code=ErrorCode.PIPELINE_FAILED.value,
+                        finished_at=datetime.now(UTC),
+                    )
+                    .execution_options(synchronize_session=False)
+                )
+                await db.commit()
+                if result.rowcount:
                     bus = EventBus(db)
                     await bus.emit(
                         job_id,
@@ -142,13 +179,11 @@ async def _run_pipeline_with_cancellation(job_id: uuid.UUID) -> None:
                             "error_code": ErrorCode.PIPELINE_FAILED.value,
                             "message": str(exc) or type(exc).__name__,
                         },
-                        stage=stage_snapshot,
                     )
                     await bus.emit_and_close(
                         job_id,
                         "done",
                         {"status": JobStatus.failed.value},
-                        stage=stage_snapshot,
                     )
                     await db.commit()
         except Exception:
@@ -173,7 +208,7 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
     # ---------- preprocessing ----------
     if await _check_cancelled(db, job.id, bus):
         return
-    job.status = JobStatus.preprocessing.value
+    await _advance_status(db, job, JobStatus.preprocessing)
     await bus.emit(
         job.id,
         "stage_changed",
@@ -199,7 +234,7 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
     # ---------- generating（agent 工作：进入 agent 调用即切换） ----------
     if await _check_cancelled(db, job.id, bus):
         return
-    job.status = JobStatus.generating.value
+    await _advance_status(db, job, JobStatus.generating)
     await bus.emit(
         job.id,
         "stage_changed",
@@ -324,7 +359,7 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
             {"stage": Stage.rendering.value, "previous": Stage.generating.value},
             stage=Stage.rendering.value,
         )
-    job.status = JobStatus.rendering.value
+    await _advance_status(db, job, JobStatus.rendering)
     await db.commit()
 
     md_key = f"jobs/{job.id}/output/paper.md"
@@ -332,12 +367,12 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
     if main_result.render_status == "succeeded":
         job.md_key = md_key
         job.pdf_key = pdf_key
-        job.status = JobStatus.completed.value
+        await _advance_status(db, job, JobStatus.completed)
     else:
         # md_only：PDF 渲染失败但 paper.md 已生成；not_attempted 为防御式兜底
         job.md_key = md_key if main_result.render_status == "md_only" else None
         job.pdf_key = None
-        job.status = JobStatus.partially_completed.value
+        await _advance_status(db, job, JobStatus.partially_completed)
     await db.commit()
 
     if main_result.render_error:
@@ -463,8 +498,12 @@ async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, An
         if upload.source_type == SourceType.past_paper:
             # 往期试卷：全文留存，稍后写入工作区材料
             past_papers.append((upload.filename or f"unnamed_{len(past_papers) + 1}", text))
+        elif upload.source_type == SourceType.keypoint_list:
+            # 重点清单：全文留存供意图提取与 agent 查阅，不走向量检索（过滤器只含
+            # book/lecture/note），跳过切块嵌入省一次 embedding 调用
+            exclusive_texts.setdefault(upload.source_type.value, []).append(text)
         elif upload.source_type in FILE_SOURCE_TYPES:
-            # 可向量化的文件类：切块 + 嵌入
+            # 可向量化的文件类（book / lecture / note）：切块 + 嵌入
             chunks = chunker.chunk(
                 text,
                 page=None,
@@ -476,10 +515,6 @@ async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, An
                 _bind_chunk_metadata(chunks, embeddings, resource=resource, upload=upload, job=job)
 
                 await vector_store.upsert(chunks)
-
-            # 重点清单：全文留存供意图提取与 agent 查阅
-            if upload.source_type == SourceType.keypoint_list:
-                exclusive_texts.setdefault(upload.source_type.value, []).append(text)
         else:
             # 文本类（manual_text / extra_requirement）：全文留存
             exclusive_texts.setdefault(upload.source_type.value, []).append(text)
@@ -505,7 +540,7 @@ async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, An
     for source_key, rel in _material_from_texts.items():
         texts = exclusive_texts.get(source_key)
         if texts:
-            await workspace.write(rel, "\n\n".join(texts))
+            await workspace.write(rel, _join_material_texts(source_key, texts))
             material_files.append(rel)
 
     context = {"materials": material_files}
@@ -519,6 +554,16 @@ def _safe_material_stem(filename: str) -> str:
     stem = Path(filename).stem
     safe = re.sub(r"[^A-Za-z0-9_\-]", "_", stem).strip("_")
     return safe[:60]
+
+
+def _join_material_texts(source_key: str, texts: list[str]) -> str:
+    """拼接全文类材料；重点清单超长时按配置截断（保护 agent 上下文）。"""
+    joined = "\n\n".join(texts)
+    if source_key == "keypoint_list":
+        limit = settings.max_keypoint_list_chars
+        if len(joined) > limit:
+            joined = joined[:limit] + f"\n\n[内容过长，已截断至 {limit} 字符]"
+    return joined
 
 
 def _bind_chunk_metadata(

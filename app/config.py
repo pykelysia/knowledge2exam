@@ -11,6 +11,9 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# jwt_secret 的内置开发默认值；生产环境（DEBUG_MODE=false）启动时校验必须覆盖
+DEFAULT_JWT_SECRET = "dev-secret-key-change-me-in-production-1234567890"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -23,7 +26,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://localhost/knowledge2exam"
 
     # 双 JWT
-    jwt_secret: str = "dev-secret-key-change-me-in-production-1234567890"
+    jwt_secret: str = DEFAULT_JWT_SECRET
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 30
@@ -47,6 +50,7 @@ class Settings(BaseSettings):
     # LLM（OpenAI 兼容协议）
     llm_api_key: str = ""
     llm_base_url: str = "http://localhost:8000/v1"
+    llm_timeout_seconds: int = 120  # 单次 LLM/OCR 请求超时（秒）
 
     # MainAgent 配置
     agent_model: str = "gpt-4o"
@@ -63,12 +67,16 @@ class Settings(BaseSettings):
     embedding_base_url: str = "https://api.openai.com/v1"
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
+    # 部分 OpenAI 兼容后端不支持 dimensions 参数，不支持时置为 false
+    embedding_send_dimensions: bool = True
 
     # 切块参数
     chunk_size: int = 700
     chunk_overlap: int = 100
 
-    # 用户文本输入长度限制（字符数），超过则触发压缩
+    # 用户文本输入长度限制（字符数）
+    # - max_extra_requirement_chars：额外要求文本上传超限即拒绝
+    # - max_keypoint_list_chars：重点清单写入 agent 材料时超长截断
     max_keypoint_list_chars: int = 3000
     max_extra_requirement_chars: int = 2000
 
