@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  backend:
+    name: 后端（ruff + pytest）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: 同步依赖
+        run: uv sync
+
+      - name: Lint（ruff）
+        run: uv run ruff check app/ tests/
+
+      - name: 测试（pytest）
+        run: uv run pytest -q
+
+  frontend:
+    name: 前端（oxlint + tsc + build）
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: Lint（oxlint）
+        run: npm run lint
+
+      - name: 类型检查 + 构建
+        run: npm run build
