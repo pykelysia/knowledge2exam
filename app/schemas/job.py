@@ -12,9 +12,7 @@ from pydantic import BaseModel, Field
 class JobStatus(StrEnum):
     pending = "pending"
     preprocessing = "preprocessing"
-    planning = "planning"
     generating = "generating"
-    reviewing = "reviewing"
     rendering = "rendering"
     completed = "completed"
     partially_completed = "partially_completed"
@@ -24,9 +22,7 @@ class JobStatus(StrEnum):
 
 class Stage(StrEnum):
     preprocessing = "preprocessing"
-    planning = "planning"
     generating = "generating"
-    reviewing = "reviewing"
     rendering = "rendering"
 
 
@@ -36,7 +32,6 @@ class JobCreate(BaseModel):
     course_id: uuid.UUID | None = None
     duration_minutes: int = Field(default=100, ge=5, le=300)
     need_explanation: bool = False
-    enable_review: bool = False
 
 
 class JobAccepted(BaseModel):
@@ -75,7 +70,6 @@ class Job(BaseModel):
     stage: Stage | None = None
     duration_minutes: int = 100
     need_explanation: bool = False
-    enable_review: bool = False
     plan: Plan | None = None
     progress: Progress | None = None
     warnings: list[Warning] = Field(default_factory=list)

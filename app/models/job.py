@@ -41,7 +41,6 @@ class Job(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
     duration_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
     need_explanation: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    enable_review: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     planned_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
     md_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     pdf_key: Mapped[str | None] = mapped_column(Text, nullable=True)
