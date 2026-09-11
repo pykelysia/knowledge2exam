@@ -1,5 +1,11 @@
 import { client } from '@/api/client'
-import type { Job, JobAccepted, JobCreate, QuestionsResponse } from '@/api/types'
+import type { Job, JobAccepted, JobCreate, JobsResponse, QuestionsResponse } from '@/api/types'
+
+/** 当前用户任务列表（最近 50 条）。 */
+export async function listJobs(): Promise<JobsResponse> {
+  const { data } = await client.get<JobsResponse>('/jobs')
+  return data
+}
 
 export async function createJob(payload: JobCreate): Promise<JobAccepted> {
   const { data } = await client.post<JobAccepted>('/jobs', payload)

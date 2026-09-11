@@ -219,23 +219,6 @@ export function Dashboard() {
         need_explanation: needExplanation,
       })
 
-      // 记录到本地历史，供任务列表页使用。
-      try {
-        const key = 'k2e.job_history'
-        const history: Array<{ job_id: string; created_at: string }> = (() => {
-          try {
-            const raw = localStorage.getItem(key)
-            return raw ? JSON.parse(raw) : []
-          } catch {
-            return []
-          }
-        })()
-        history.unshift({ job_id: job.job_id, created_at: new Date().toISOString() })
-        localStorage.setItem(key, JSON.stringify(history.slice(0, 100)))
-      } catch {
-        // 忽略存储失败。
-      }
-
       navigate(`/jobs/${job.job_id}`)
     } catch (err) {
       const apiErr = extractApiError(err)

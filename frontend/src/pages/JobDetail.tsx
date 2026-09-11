@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import axios from 'axios'
 import { useParams } from 'react-router-dom'
 import { getJob, cancelJob, listQuestions, resolveArtifactUrl, downloadArtifact } from '@/api/jobs'
 import { useJobStream } from '@/hooks/useJobStream'
@@ -31,34 +32,43 @@ export function JobDetail() {
   const [questions, setQuestions] = useState<Question[]>([])
   const [error, setError] = useState<string | null>(null)
   const [logs, setLogs] = useState<string[]>([])
-  const timerRef = useRef<number | null>(null)
+  // 任务删除（404）或进入终态后停止轮询
+  const [pollingStopped, setPollingStopped] = useState(false)
+  const inFlightRef = useRef(false)
 
-  // 轮询降级 + 初始快照。
+  const TERMINAL_STATUSES = ['completed', 'partially_completed', 'failed', 'cancelled']
+
+  /** 拉取任务快照；返回 true 表示任务已不存在（404）。 */
+  const load = useCallback(async (id: string): Promise<boolean> => {
+    if (inFlightRef.current) return false // 并发去重：丢弃重复触发
+    inFlightRef.current = true
+    try {
+      const snap = await getJob(id)
+      setJob(snap)
+      setError(null)
+      if (TERMINAL_STATUSES.includes(snap.status)) {
+        setPollingStopped(true)
+      }
+      return false
+    } catch (err) {
+      if (axios.isAxiosError(err) && err.response?.status === 404) {
+        setError('任务不存在或已被删除')
+        setPollingStopped(true)
+        return true
+      }
+      const apiErr = extractApiError(err)
+      setError(apiErr ? errorMessage(apiErr.error_code) : '加载任务失败')
+      return false
+    } finally {
+      inFlightRef.current = false
+    }
+  }, [])
+
+  // 初始快照。
   useEffect(() => {
     if (!jobId) return
-    const id = jobId
-    let cancelled = false
-    async function load() {
-      try {
-        const snap = await getJob(id)
-        if (!cancelled) setJob(snap)
-      } catch (err) {
-        if (!cancelled) {
-          const apiErr = extractApiError(err)
-          setError(apiErr ? errorMessage(apiErr.error_code) : '加载任务失败')
-        }
-      }
-    }
-    load()
-    timerRef.current = window.setInterval(load, 5000)
-    return () => {
-      cancelled = true
-      if (timerRef.current) {
-        clearInterval(timerRef.current)
-        timerRef.current = null
-      }
-    }
-  }, [jobId])
+    void load(jobId)
+  }, [jobId, load])
 
   const handleEvent = useCallback(
     (type: JobEventType, data: JobEventData) => {
@@ -86,6 +96,8 @@ export function JobDetail() {
         case 'done': {
           const d = data as Extract<JobEventData, { status: string }>
           setLogs((prev) => [...prev, `任务结束：${d.status}`])
+          // done 事件不含完整快照（产物 URL 等），拉一次终态快照
+          if (jobId) void load(jobId)
           break
         }
         case 'error': {
@@ -95,7 +107,7 @@ export function JobDetail() {
         }
       }
     },
-    [],
+    [jobId, load],
   )
 
   const { connectionState } = useJobStream({
@@ -103,15 +115,15 @@ export function JobDetail() {
     onEvent: handleEvent,
   })
 
-  // 任务进入终态后停止轮询。
+  // SSE 已打开时以事件流为准（done 事件会触发快照刷新）；
+  // 未连接或连接异常时降级为 5s 轮询，404/终态后停止。
   useEffect(() => {
-    if (!job || !jobId) return
-    const terminalStatuses = ['completed', 'partially_completed', 'failed', 'cancelled']
-    if (terminalStatuses.includes(job.status) && timerRef.current) {
-      clearInterval(timerRef.current)
-      timerRef.current = null
-    }
-  }, [job?.status, jobId, job])
+    if (!jobId || pollingStopped || connectionState === 'open') return
+    const timer = window.setInterval(() => {
+      void load(jobId)
+    }, 5000)
+    return () => window.clearInterval(timer)
+  }, [jobId, connectionState, pollingStopped, load])
   useEffect(() => {
     if (!jobId || !job) return
     if (QUESTION_VISIBLE_STATUSES.includes(job.status)) {
@@ -161,11 +173,8 @@ export function JobDetail() {
     if (!jobId) return
     try {
       await cancelJob(jobId)
-      // 取消后立即停止轮询，避免继续请求已取消任务。
-      if (timerRef.current) {
-        clearInterval(timerRef.current)
-        timerRef.current = null
-      }
+      // 取消后拉一次终态快照（轮询在进入终态后自动停止）
+      void load(jobId)
       setLogs((prev) => [...prev, '已发出取消请求'])
     } catch (err) {
       const apiErr = extractApiError(err)

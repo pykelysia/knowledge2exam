@@ -158,6 +158,12 @@ uv run uvicorn app.main:app --reload --port 8000
 
 服务将在 `http://localhost:8000` 启动，API 文档见 `http://localhost:8000/docs`。
 
+> **部署约束**：SSE 实时推送与任务取消依赖进程内状态（事件订阅队列、asyncio 任务注册表），
+> 当前仅支持**单进程单 worker** 部署（默认 `uvicorn app.main:app`）。多 worker 部署会导致
+> 事件推送丢失，需先引入跨进程事件通道（如 Redis pub/sub）。生产环境启动前必须配置
+> `JWT_SECRET`（非默认值），服务会在启动时校验；服务重启时会把遗留的非终态任务定格为
+> `failed`（`SERVER_RESTARTED`）。
+
 ### 7. 前端（可选）
 
 ```bash
@@ -249,7 +255,7 @@ docs/                           # 文档目录
 |------|------|------|
 | 认证 | `/api/v1/auth` | 注册 / 登录 / 刷新 / 登出（httpOnly Cookie 双 JWT） |
 | 上传 | `/api/v1/uploads` | 文件（multipart）或文本（JSON）上传；删除 |
-| 任务 | `/api/v1/jobs` | 创建 / 详情 / SSE 进度流 / 题目列表 / 取消 / 删除 |
+| 任务 | `/api/v1/jobs` | 列表 / 创建 / 详情 / SSE 进度流 / 题目列表 / 取消 / 删除 |
 | 产物 | `/api/v1/jobs/{id}/paper.md`、`/paper.pdf` | 试卷产物下载 |
 | 学校/课程 | `/api/v1/schools` | 学校列表 / 课程列表（可选：同校同课程共享知识库） |
 

@@ -42,7 +42,9 @@ export function useJobStream({ jobId, onEvent }: UseJobStreamOptions) {
     setError(null)
 
     try {
-      es = new EventSource(url)
+      // 跨域直连部署时必须携带凭证，否则后端 401（与 axios client 的
+      // withCredentials 保持一致）
+      es = new EventSource(url, { withCredentials: true })
     } catch {
       setConnectionState('closed')
       setError('无法建立进度连接')
@@ -73,12 +75,7 @@ export function useJobStream({ jobId, onEvent }: UseJobStreamOptions) {
     const listeners: Array<[string, (e: MessageEvent) => void]> = eventTypes.map((type) => {
       const handler = (e: MessageEvent) => {
         try {
-          const raw = JSON.parse(e.data as string) as JobEvent['data'] & { __close__?: boolean }
-          // 优先处理关闭信号（不回调 onEvent）
-          if (raw.__close__) {
-            es?.close()
-            return
-          }
+          const raw = JSON.parse(e.data as string) as JobEvent['data']
           const seq = (e as MessageEvent & { lastEventId?: string }).lastEventId
             ? Number((e as MessageEvent & { lastEventId?: string }).lastEventId)
             : undefined

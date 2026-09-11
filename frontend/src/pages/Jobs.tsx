@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { getJob, deleteJob, cancelJob } from '@/api/jobs'
+import { listJobs, deleteJob, cancelJob } from '@/api/jobs'
 import { useAuth } from '@/hooks/useAuth'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -9,39 +9,19 @@ import { extractApiError } from '@/api/client'
 import { JOB_STATUS_META, errorMessage } from '@/lib/constants'
 import type { Job } from '@/api/types'
 
-const HISTORY_KEY = 'k2e.job_history'
-
-interface HistoryItem {
-  job_id: string
-  created_at: string
-}
-
-function loadHistory(): HistoryItem[] {
-  try {
-    const raw = localStorage.getItem(HISTORY_KEY)
-    return raw ? JSON.parse(raw) : []
-  } catch {
-    return []
-  }
-}
-
 export function Jobs() {
   const { isAuthenticated } = useAuth()
   const [jobs, setJobs] = useState<Job[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
+  // 任务列表以后端为唯一数据源：跨设备一致，账号切换不串数据
   const refresh = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      const history = loadHistory().slice(0, 50)
-      const results = await Promise.all(
-        history.map((item) =>
-          getJob(item.job_id).catch(() => null),
-        ),
-      )
-      setJobs(results.filter((j): j is Job => j !== null))
+      const data = await listJobs()
+      setJobs(data.jobs)
     } catch (err) {
       const apiErr = extractApiError(err)
       setError(apiErr ? errorMessage(apiErr.error_code) : '加载任务列表失败')
@@ -59,7 +39,7 @@ export function Jobs() {
   async function handleDelete(jobId: string) {
     try {
       await deleteJob(jobId)
-      setJobs((prev) => prev.filter((j) => j.job_id !== jobId))
+      await refresh()
     } catch (err) {
       const apiErr = extractApiError(err)
       alert(apiErr ? errorMessage(apiErr.error_code) : '删除失败')
@@ -69,7 +49,8 @@ export function Jobs() {
   async function handleCancel(jobId: string) {
     try {
       await cancelJob(jobId)
-      setJobs((prev) => prev.filter((j) => j.job_id !== jobId))
+      // 取消成功后任务仍保留在列表中（状态变为 cancelled），刷新以展示真实状态
+      await refresh()
     } catch (err) {
       const apiErr = extractApiError(err)
       alert(apiErr ? errorMessage(apiErr.error_code) : '取消失败')

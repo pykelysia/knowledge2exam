@@ -19,12 +19,10 @@ export const FILE_SOURCE_TYPES = (
   Object.keys(SOURCE_TYPE_META) as SourceType[]
 ).filter((t) => SOURCE_TYPE_META[t].fileOnly)
 
-/** 允许上传的文件扩展名。 */
+/** 允许上传的文件扩展名（与后端 SUPPORTED_EXTENSIONS 保持一致，不含 doc/ppt 旧格式）。 */
 export const ALLOWED_EXTENSIONS = [
   'docx',
-  'doc',
   'pptx',
-  'ppt',
   'pdf',
   'md',
   'txt',
@@ -57,6 +55,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
   SHARE_SCOPE_REQUIRED: '选择共享需指定学校与课程',
   INVALID_DURATION: '考试时长需在 5~300 分钟之间',
   JOB_NOT_FOUND: '任务不存在或无权访问',
+  SCHOOL_NOT_FOUND: '学校不存在或已被移除',
   UPLOAD_IN_USE: '该上传件已被任务引用，不可删除',
   JOB_NOT_READY: '产物尚未生成，请稍后再试',
   JOB_ALREADY_FINISHED: '任务已终结，无法取消',
@@ -75,6 +74,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
   RENDER_FAILED: 'PDF 渲染失败，可下载 md 作为替代',
   AGENT_WARNING: '生成过程告警，请留意任务日志',
   PIPELINE_FAILED: '任务执行失败，请查看任务日志或稍后重试',
+  SERVER_RESTARTED: '服务重启导致任务中断，请重新创建任务',
 }
 
 /** 将任意错误码映射为可展示的中文提示。 */

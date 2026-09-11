@@ -145,6 +145,19 @@ paths:
         '409':
           $ref: '#/components/responses/UploadInUse'
   /jobs:
+    get:
+      tags: [Jobs]
+      operationId: listJobs
+      summary: 当前用户任务列表
+      description: 最近 50 条，按创建时间倒序。列表项不含 progress / plan.distribution 聚合
+        （以详情端点为准）。
+      responses:
+        '200':
+          description: 任务列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobsResponse'
     post:
       tags: [Jobs]
       operationId: createJob
@@ -205,7 +218,8 @@ paths:
 
         事件类型与 `data` 结构（由 `app/orchestration/stages.py` 发出）：
 
-        - `stage_changed`：`{stage, previous}` —— 阶段切换（preprocessing / generating / rendering）
+        - `stage_changed`：`{stage, previous}` —— 阶段切换（preprocessing / generating / rendering）；
+          首帧 `previous` 为 `pending`，后续帧为上一个 Stage
         - `plan_ready`：`{total, distribution, reference_used, duration_minutes}` ——
           agent 出题蓝图就绪；`distribution` 按题型（choice / blank / short_answer）计数，
           `reference_used` 当前恒为 `agent_planning`
@@ -443,6 +457,8 @@ components:
         password:
           type: string
           minLength: 8
+          maxLength: 72
+          description: 按字节计最长 72（bcrypt 限制），中文等多字节字符需注意
     LoginRequest:
       type: object
       required: [password]
@@ -457,6 +473,8 @@ components:
           nullable: true
         password:
           type: string
+          maxLength: 72
+          description: 按字节计最长 72（bcrypt 限制）
     User:
       type: object
       required: [user_id, email, username]
@@ -493,7 +511,9 @@ components:
           enum: [manual_text, extra_requirement]
         raw_text:
           type: string
-          description: 文本正文
+          minLength: 1
+          maxLength: 200000
+          description: 文本正文；extra_requirement 另受 max_extra_requirement_chars（默认 2000）限制
     Preview:
       type: object
       description: 解析预览
@@ -671,6 +691,15 @@ components:
           type: string
           format: date-time
           nullable: true
+    JobsResponse:
+      type: object
+      description: 当前用户任务列表（GET /jobs）
+      required: [jobs]
+      properties:
+        jobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/Job'
     JobStatus:
       type: string
       enum: [pending, preprocessing, generating, rendering, completed, partially_completed, failed, cancelled]
@@ -793,6 +822,7 @@ components:
         - SHARE_SCOPE_REQUIRED
         - INVALID_DURATION
         - JOB_NOT_FOUND
+        - SCHOOL_NOT_FOUND
         - UPLOAD_IN_USE
         - JOB_NOT_READY
         - JOB_ALREADY_FINISHED
@@ -803,6 +833,7 @@ components:
         - RENDER_FAILED
         - AGENT_WARNING
         - PIPELINE_FAILED
+        - SERVER_RESTARTED
         - MODEL_UNAVAILABLE
         - RATE_LIMITED
         - USER_EXISTS

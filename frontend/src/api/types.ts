@@ -142,6 +142,10 @@ export interface Job {
   finished_at?: string | null
 }
 
+export interface JobsResponse {
+  jobs: Job[]
+}
+
 // ---- 题目 ----
 
 export type QuestionType = 'choice' | 'blank' | 'short_answer'
@@ -196,6 +200,7 @@ export type ErrorCode =
   | 'SHARE_SCOPE_REQUIRED'
   | 'INVALID_DURATION'
   | 'JOB_NOT_FOUND'
+  | 'SCHOOL_NOT_FOUND'
   | 'UPLOAD_IN_USE'
   | 'JOB_NOT_READY'
   | 'JOB_ALREADY_FINISHED'
@@ -206,6 +211,7 @@ export type ErrorCode =
   | 'RENDER_FAILED'
   | 'AGENT_WARNING'
   | 'PIPELINE_FAILED'
+  | 'SERVER_RESTARTED'
   | 'MODEL_UNAVAILABLE'
   | 'RATE_LIMITED'
   | 'USER_EXISTS'
@@ -234,7 +240,8 @@ export type JobEventType =
 
 export interface StageChangedData {
   stage: Stage
-  previous?: Stage
+  // 首帧 previous 为 pending（进入 preprocessing），后续帧为上一个 Stage
+  previous?: Stage | 'pending'
 }
 
 export interface PlanReadyData {
