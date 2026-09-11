@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import uuid
 from datetime import UTC, datetime
@@ -34,15 +35,14 @@ from app.ingestion.parsers import get_parser
 from app.ingestion.postprocess import build_merged_text, process_images
 from app.models.job import Job, JobUpload
 from app.models.plan import PlanItem
-from app.models.question import Question
 from app.models.resource import Resource
 from app.models.upload import Upload
 from app.orchestration.events import EventBus
 from app.orchestration.integration import persist_exam_result
-from app.orchestration.state_machine import JobStatus, Stage
-from app.rendering.markdown import build_markdown
-from app.rendering.renderer import get_renderer
+from app.orchestration.state_machine import JobStatus, Stage, is_terminal
 from app.retrieval.vector_store import PgVectorStore
+
+logger = logging.getLogger(__name__)
 
 
 async def _get_job_upload_ids(db: AsyncSession, job_id: uuid.UUID) -> list[uuid.UUID]:
@@ -96,7 +96,7 @@ async def run_pipeline(job_id: uuid.UUID) -> None:
 
 
 async def _run_pipeline_with_cancellation(job_id: uuid.UUID) -> None:
-    """包装 run_pipeline，处理任务注册和取消。"""
+    """包装 run_pipeline，处理任务注册、取消与意外失败的终态收敛。"""
     try:
         await run_pipeline(job_id)
     except asyncio.CancelledError:
@@ -115,10 +115,49 @@ async def _run_pipeline_with_cancellation(job_id: uuid.UUID) -> None:
                 )
                 await db.commit()
         raise
+    except Exception as exc:
+        # 意外异常兜底：任务定格为 failed 并推送终态事件，
+        # 避免任务永远停留在非终态、前端无限轮询。
+        await log_error(
+            job_id=str(job_id),
+            exc=exc,
+            stage=Stage.generating.value,
+            context={},
+        )
+        try:
+            async with AsyncSessionLocal() as db:
+                job = await db.get(Job, job_id)
+                if job and not is_terminal(job.status):
+                    stage_snapshot = job.status  # 事件里标注实际出错阶段
+                    job.status = JobStatus.failed.value
+                    job.error_code = ErrorCode.PIPELINE_FAILED.value
+                    job.finished_at = datetime.now(UTC)
+                    await db.commit()
+
+                    bus = EventBus(db)
+                    await bus.emit(
+                        job_id,
+                        "error",
+                        {
+                            "error_code": ErrorCode.PIPELINE_FAILED.value,
+                            "message": str(exc) or type(exc).__name__,
+                        },
+                        stage=stage_snapshot,
+                    )
+                    await bus.emit_and_close(
+                        job_id,
+                        "done",
+                        {"status": JobStatus.failed.value},
+                        stage=stage_snapshot,
+                    )
+                    await db.commit()
+        except Exception:
+            logger.exception("失败兜底处理时再次出错（job=%s）", job_id)
+        raise
 
 
 async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
-    """真实 pipeline：preprocessing -> planning -> agent -> rendering。"""
+    """真实 pipeline：preprocessing -> generating(agent) -> rendering。"""
     import time
 
     if await _check_cancelled(db, job.id, bus):
@@ -157,21 +196,17 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
         elapsed_ms=pre_elapsed,
     )
 
-    # ---------- planning ----------
+    # ---------- generating（agent 工作：进入 agent 调用即切换） ----------
     if await _check_cancelled(db, job.id, bus):
         return
-    job.status = JobStatus.planning.value
+    job.status = JobStatus.generating.value
     await bus.emit(
         job.id,
         "stage_changed",
-        {"stage": Stage.planning.value, "previous": Stage.preprocessing.value},
-        stage=Stage.planning.value,
+        {"stage": Stage.generating.value, "previous": Stage.preprocessing.value},
+        stage=Stage.generating.value,
     )
     await db.commit()
-
-    # ---------- main agent (planning + generating) ----------
-    if await _check_cancelled(db, job.id, bus):
-        return
 
     main_agent_context = {
         "duration_minutes": job.duration_minutes,
@@ -195,7 +230,7 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
                 "reference_used": "agent_planning",
                 "duration_minutes": job.duration_minutes,
             },
-            stage=Stage.planning.value,
+            stage=Stage.generating.value,
         )
 
     async def on_question_accepted(question, completed: int, total: int) -> None:  # noqa: ANN001
@@ -216,13 +251,12 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
             job.id,
             "warning",
             {"code": ErrorCode.AGENT_WARNING, "message": message},
-            stage=Stage.planning.value,
+            stage=Stage.generating.value,
         )
 
     # 渲染阶段的 stage_changed 事件：agent 的 render_paper 首次执行时发出，
     # 重试不重复发；agent 未调用渲染工具时由渲染段补发。
     render_stage_emitted = False
-    render_previous_stage = Stage.reviewing if job.enable_review else Stage.generating
 
     async def on_render_start() -> None:
         nonlocal render_stage_emitted
@@ -231,7 +265,7 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
             await bus.emit(
                 job.id,
                 "stage_changed",
-                {"stage": Stage.rendering.value, "previous": render_previous_stage.value},
+                {"stage": Stage.rendering.value, "previous": Stage.generating.value},
                 stage=Stage.rendering.value,
             )
 
@@ -263,7 +297,7 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
     await log_step(
         job_id=str(job.id),
         name="run_exam_agent",
-        stage=Stage.planning.value,
+        stage=Stage.generating.value,
         input={"context_keys": list(main_agent_context.keys())},
         output={
             "plan_items": len(main_result.plan_items),
@@ -286,7 +320,7 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
         await bus.emit(
             job.id,
             "stage_changed",
-            {"stage": Stage.rendering.value, "previous": render_previous_stage.value},
+            {"stage": Stage.rendering.value, "previous": Stage.generating.value},
             stage=Stage.rendering.value,
         )
     job.status = JobStatus.rendering.value
@@ -337,205 +371,6 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
         stage=Stage.rendering.value,
     )
     await db.commit()
-
-
-# ---------------------------------------------------------------------------
-# 模拟 pipeline（fallback / 本地演示）
-# ---------------------------------------------------------------------------
-
-_MOCK_TOTAL = 6
-_MOCK_DISTRIBUTION = {"choice": 2, "blank": 2, "short_answer": 2}
-
-
-async def run_mock_pipeline(job_id: uuid.UUID) -> None:
-    """在独立会话中执行模拟生成流程。"""
-    async with AsyncSessionLocal() as db:
-        job = await db.get(Job, job_id)
-        if job is None:
-            return
-        bus = EventBus(db)
-
-        if await _check_cancelled(db, job_id, bus):
-            return
-
-        job.status = JobStatus.preprocessing.value
-        await bus.emit(
-            job.id,
-            "stage_changed",
-            {"stage": Stage.preprocessing.value, "previous": JobStatus.pending.value},
-            stage=Stage.preprocessing.value,
-        )
-        await db.commit()
-        await asyncio.sleep(getattr(settings, "mock_stage_delay_seconds", 0.5))
-
-        if await _check_cancelled(db, job_id, bus):
-            return
-        job.status = JobStatus.planning.value
-        await bus.emit(
-            job.id,
-            "stage_changed",
-            {"stage": Stage.planning.value, "previous": Stage.preprocessing.value},
-            stage=Stage.planning.value,
-        )
-        await db.commit()
-        await asyncio.sleep(getattr(settings, "mock_stage_delay_seconds", 0.5))
-
-        await bus.emit(
-            job.id,
-            "plan_ready",
-            {
-                "total": _MOCK_TOTAL,
-                "distribution": _MOCK_DISTRIBUTION,
-                "reference_used": "default_template",
-                "duration_minutes": job.duration_minutes,
-            },
-            stage=Stage.planning.value,
-        )
-        job.planned_total = _MOCK_TOTAL
-        await db.commit()
-        await asyncio.sleep(getattr(settings, "mock_stage_delay_seconds", 0.5))
-
-        if await _check_cancelled(db, job_id, bus):
-            return
-        job.status = JobStatus.generating.value
-        await bus.emit(
-            job.id,
-            "stage_changed",
-            {"stage": Stage.generating.value, "previous": Stage.planning.value},
-            stage=Stage.generating.value,
-        )
-        await db.commit()
-        await asyncio.sleep(getattr(settings, "mock_stage_delay_seconds", 0.5))
-
-        type_specs = [
-            ("choice", {"A": "正确选项", "B": "干扰项", "C": "干扰项", "D": "干扰项"}, "A"),
-            ("choice", {"A": "干扰项", "B": "正确选项", "C": "干扰项", "D": "干扰项"}, "B"),
-            ("blank", None, "单位冲激响应"),
-            ("blank", None, "狄利克雷条件"),
-            ("short_answer", None, "见各子问题答案"),
-            ("short_answer", None, "见各子问题答案"),
-        ]
-
-        seq = 0
-        paper_pairs: list[tuple[PlanItem, Question]] = []
-        for question_type, options, answer in type_specs:
-            seq += 1
-            plan = PlanItem(
-                job_id=job_id,
-                seq=seq,
-                question_type=question_type,
-                knowledge_point=f"知识点 {seq}",
-                exam_direction=f"考察方向 {seq}",
-                difficulty="medium",
-            )
-            db.add(plan)
-            await db.flush()
-
-            stem = f"第 {seq} 题（{question_type}）模拟题干"
-            explanation = f"第 {seq} 题解析" if job.need_explanation else None
-            q = Question(
-                job_id=job_id,
-                plan_item_id=plan.id,
-                seq=seq,
-                question_type=question_type,
-                stem=stem,
-                options=options,
-                answer=answer,
-                sub_questions=["子问题 1", "子问题 2"] if question_type == "short_answer" else None,
-                sub_answers=["子答案 1", "子答案 2"] if question_type == "short_answer" else None,
-                explanation=explanation,
-                status="accepted",
-            )
-            db.add(q)
-            await db.flush()
-            paper_pairs.append((plan, q))
-
-            await bus.emit(
-                job.id,
-                "question_completed",
-                {
-                    "seq": seq,
-                    "question_type": question_type,
-                    "completed": seq,
-                    "total": _MOCK_TOTAL,
-                },
-                stage=Stage.generating.value,
-            )
-            await db.commit()
-            await asyncio.sleep(getattr(settings, "mock_stage_delay_seconds", 0.5))
-
-        if job.enable_review:
-            if await _check_cancelled(db, job_id, bus):
-                return
-            job.status = JobStatus.reviewing.value
-            await bus.emit(
-                job.id,
-                "stage_changed",
-                {"stage": Stage.reviewing.value, "previous": Stage.generating.value},
-                stage=Stage.reviewing.value,
-            )
-            await db.commit()
-            await asyncio.sleep(getattr(settings, "mock_stage_delay_seconds", 0.5))
-
-            await bus.emit(
-                job.id,
-                "review_result",
-                {"checked": _MOCK_TOTAL, "passed": _MOCK_TOTAL, "rejected": [], "auto_fixed": []},
-                stage=Stage.reviewing.value,
-            )
-            await db.commit()
-            await asyncio.sleep(getattr(settings, "mock_stage_delay_seconds", 0.5))
-
-        previous = Stage.reviewing if job.enable_review else Stage.generating
-        if await _check_cancelled(db, job_id, bus):
-            return
-        job.status = JobStatus.rendering.value
-        await bus.emit(
-            job.id,
-            "stage_changed",
-            {"stage": Stage.rendering.value, "previous": previous.value},
-            stage=Stage.rendering.value,
-        )
-        await db.commit()
-        await asyncio.sleep(getattr(settings, "mock_stage_delay_seconds", 0.5))
-
-        title = f"模拟试卷（{job.duration_minutes} 分钟）"
-        md_bytes = build_markdown(title, paper_pairs, job.need_explanation).encode("utf-8")
-        md_key = f"jobs/{job_id}/output/paper.md"
-        pdf_key = f"jobs/{job_id}/output/paper.pdf"
-        await storage.put(md_key, md_bytes)
-
-        job.pdf_key = None
-        try:
-            pdf = await get_renderer().render_markdown(md_bytes, title=title)
-            await storage.put(pdf_key, pdf)
-            job.pdf_key = pdf_key
-        except Exception as exc:
-            await bus.emit(
-                job.id,
-                "warning",
-                {"code": ErrorCode.RENDER_FAILED, "message": str(exc)},
-                stage=Stage.rendering.value,
-            )
-        job.md_key = md_key
-        job.status = (
-            JobStatus.completed.value if job.pdf_key else JobStatus.partially_completed.value
-        )
-        await db.commit()
-
-        await bus.emit_and_close(
-            job.id,
-            "done",
-            {
-                "status": job.status,
-                "total": _MOCK_TOTAL,
-                "abandoned": 0,
-                "md_url": f"/api/v1/jobs/{job_id}/paper.md",
-                "pdf_url": f"/api/v1/jobs/{job_id}/paper.pdf" if job.pdf_key else None,
-            },
-            stage=Stage.rendering.value,
-        )
-        await db.commit()
 
 
 # ---------------------------------------------------------------------------

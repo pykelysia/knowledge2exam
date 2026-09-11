@@ -56,7 +56,7 @@ async def log_error(
     Args:
         job_id: 当前任务 ID。
         exc: 捕获到的异常对象。
-        stage: 出错阶段名称（如 ``preprocessing`` / ``planning``）。
+        stage: 出错阶段名称（如 ``preprocessing`` / ``generating``）。
         context: 额外上下文信息（模型名、上传件数等），会被精简后写入。
     """
     # 精简 context，避免日志爆炸

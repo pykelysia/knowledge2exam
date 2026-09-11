@@ -44,9 +44,6 @@ class Settings(BaseSettings):
     # CORS
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
 
-    # 模拟 pipeline 的步进间隔（秒），用于本地演示 SSE 进度
-    mock_stage_delay_seconds: float = 0.5
-
     # LLM（OpenAI 兼容协议）
     llm_api_key: str = ""
     llm_base_url: str = "http://localhost:8000/v1"
