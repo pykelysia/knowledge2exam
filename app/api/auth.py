@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -87,7 +88,12 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
         password_hash=hash_password(payload.password),
     )
     db.add(user)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        # 先查后插仍有窗口期，并发重名在唯一约束处收敛为 409
+        await db.rollback()
+        raise UserExists() from exc
     await db.refresh(user)
     return UserResponse(user=_user_to_schema(user))
 

@@ -9,7 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
-from app.core.exceptions import JobNotFound
+from app.core.exceptions import SchoolNotFound
 from app.models.catalog import Course, School
 from app.models.resource import Resource
 from app.schemas.catalog import Course as CourseSchema
@@ -33,7 +33,7 @@ async def list_courses(
 ) -> CoursesResponse:
     school = await db.get(School, school_id)
     if school is None:
-        raise JobNotFound()
+        raise SchoolNotFound()
 
     # 每门课程共享库资源数（is_shared = true）
     counts = dict(

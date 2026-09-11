@@ -31,6 +31,9 @@ class Storage:
     async def delete(self, key: str) -> None:  # pragma: no cover
         raise NotImplementedError
 
+    async def delete_prefix(self, prefix: str) -> int:  # pragma: no cover
+        raise NotImplementedError
+
     async def list(self, prefix: str) -> list[str]:  # pragma: no cover
         raise NotImplementedError
 
@@ -73,6 +76,13 @@ class LocalStorage(Storage):
         p = self._path(key)
         if p.exists():
             p.unlink()
+
+    async def delete_prefix(self, prefix: str) -> int:
+        """删除前缀下所有对象，返回删除数量。"""
+        keys = await self.list(prefix)
+        for key in keys:
+            await self.delete(key)
+        return len(keys)
 
     async def list(self, prefix: str) -> list[str]:
         """列出前缀下的所有 key（排序后返回）。"""

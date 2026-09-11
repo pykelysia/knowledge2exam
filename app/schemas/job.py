@@ -78,3 +78,7 @@ class Job(BaseModel):
     error_code: str | None = None
     created_at: datetime
     finished_at: datetime | None = None
+
+
+class JobsResponse(BaseModel):
+    jobs: list[Job] = Field(default_factory=list)

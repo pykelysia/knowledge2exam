@@ -233,7 +233,10 @@ async def create_upload(
         )
 
     if content_type.startswith("application/json"):
-        body = await request.json()
+        try:
+            body = await request.json()
+        except Exception as exc:  # noqa: BLE001
+            raise AppException(ErrorCode.INPUT_EMPTY, "请求体不是合法 JSON") from exc
         try:
             payload = TextUploadCreate(**body)
         except Exception as exc:  # noqa: BLE001
@@ -242,6 +245,15 @@ async def create_upload(
             raise AppException(
                 ErrorCode.SHARE_NOT_ALLOWED,
                 "手动输入类内容不接受 shareable 字段",
+            )
+        if (
+            payload.source_type == SourceType.extra_requirement
+            and len(payload.raw_text) > settings.max_extra_requirement_chars
+        ):
+            raise AppException(
+                ErrorCode.INPUT_EMPTY,
+                f"额外要求超过长度上限（{settings.max_extra_requirement_chars} 字符）",
+                detail={"max_chars": settings.max_extra_requirement_chars},
             )
         return await _store_text(db, user, payload.source_type, payload.raw_text)
 

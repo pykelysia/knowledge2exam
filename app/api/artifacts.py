@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.core.deps import get_current_user
-from app.core.exceptions import JobNotReady, RenderFailed
+from app.core.exceptions import JobNotFound, JobNotReady, RenderFailed
 from app.core.storage import storage
 from app.models.job import Job
 from app.models.user import AppUser
@@ -26,7 +26,7 @@ async def download_paper_md(
 ) -> Response:
     job = await db.get(Job, job_id)
     if job is None or job.user_id != user.id:
-        raise HTTPException(status_code=404, detail="Job not found")
+        raise JobNotFound()
     if job.md_key is None:
         raise JobNotReady()
     try:
@@ -47,7 +47,7 @@ async def download_paper_pdf(
 ) -> Response:
     job = await db.get(Job, job_id)
     if job is None or job.user_id != user.id:
-        raise HTTPException(status_code=404, detail="Job not found")
+        raise JobNotFound()
     if job.pdf_key is None:
         # partially_completed 且 md 存在但 PDF 失败 → RENDER_FAILED
         if job.md_key is not None:

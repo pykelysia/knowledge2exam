@@ -1,9 +1,10 @@
-"""任务端点：创建 / 快照 / SSE / 题目 / 取消 / 删除。"""
+"""任务端点：列表 / 创建 / 快照 / SSE / 题目 / 取消 / 删除。"""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from datetime import UTC, datetime
 
@@ -20,12 +21,15 @@ from app.core.exceptions import (
     ErrorCode,
     JobAlreadyFinished,
     JobNotFound,
+    SchoolNotFound,
     UploadNotFound,
 )
 from app.core.storage import storage
 from app.core.task_registry import cancel as cancel_task
 from app.core.task_registry import register
+from app.models.catalog import Course, School
 from app.models.job import Job, JobStage, JobUpload
+from app.models.plan import PlanItem
 from app.models.question import Question
 from app.models.upload import Upload
 from app.models.user import AppUser
@@ -35,7 +39,9 @@ from app.schemas.job import (
     Artifacts,
     JobAccepted,
     JobCreate,
+    JobsResponse,
     Plan,
+    Progress,
     Warning,
 )
 from app.schemas.job import (
@@ -46,10 +52,44 @@ from app.schemas.question import QuestionsResponse
 
 router = APIRouter(tags=["Jobs"])
 
+logger = logging.getLogger(__name__)
 
-def _job_to_schema(job: Job, last_event_seq: int) -> JobSchema:
-    plan = None
-    if job.planned_total is not None:
+
+async def _build_plan_and_progress(
+    db: AsyncSession, job: Job
+) -> tuple[Plan | None, Progress | None]:
+    """从 DB 聚合蓝图分布与逐题进度（agent 产物入库后才有数据）。"""
+    dist_rows = await db.execute(
+        select(PlanItem.question_type, func.count(PlanItem.id))
+        .where(PlanItem.job_id == job.id, PlanItem.superseded_by.is_(None))
+        .group_by(PlanItem.question_type)
+    )
+    distribution = {question_type: count for question_type, count in dist_rows.all()}
+    if not distribution:
+        return None, None
+
+    completed = await db.scalar(select(func.count(Question.id)).where(Question.job_id == job.id))
+    abandoned = await db.scalar(
+        select(func.count(PlanItem.id)).where(
+            PlanItem.job_id == job.id,
+            PlanItem.superseded_by.is_(None),
+            PlanItem.knowledge_point.like("[已放弃]%"),
+        )
+    )
+    total = sum(distribution.values())
+    plan = Plan(total=total, distribution=distribution)
+    progress = Progress(completed=completed or 0, total=total, abandoned=abandoned or 0)
+    return plan, progress
+
+
+async def _job_to_schema(
+    db: AsyncSession, job: Job, last_event_seq: int, *, with_progress: bool = True
+) -> JobSchema:
+    plan: Plan | None = None
+    progress: Progress | None = None
+    if with_progress:
+        plan, progress = await _build_plan_and_progress(db, job)
+    if plan is None and job.planned_total is not None:
         plan = Plan(total=job.planned_total, distribution={})
 
     artifacts = Artifacts(
@@ -108,6 +148,19 @@ async def create_job(
     if not payload.upload_ids and not text_uploads:
         raise AppException(ErrorCode.INPUT_EMPTY, "无任何输入")
 
+    if payload.school_id is not None or payload.course_id is not None:
+        if payload.school_id is None or payload.course_id is None:
+            raise AppException(
+                ErrorCode.SHARE_SCOPE_REQUIRED, "school_id 与 course_id 必须同时提供"
+            )
+        if await db.get(School, payload.school_id) is None:
+            raise SchoolNotFound()
+        course = await db.get(Course, payload.course_id)
+        if course is None or course.school_id != payload.school_id:
+            raise AppException(
+                ErrorCode.SHARE_SCOPE_REQUIRED, "课程不存在或不属于该学校"
+            )
+
     if any(u.shareable for u in uploads) and (not payload.school_id or not payload.course_id):
         raise AppException(
             ErrorCode.SHARE_SCOPE_REQUIRED, "共享但未指定学校课程"
@@ -136,6 +189,38 @@ async def create_job(
     return JobAccepted(job_id=job.id, status=JobStatus.pending, created_at=job.created_at)
 
 
+@router.get("/jobs", response_model=JobsResponse)
+async def list_jobs(
+    user: AppUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> JobsResponse:
+    """当前用户的任务列表（最近 50 条，创建时间倒序）。"""
+    rows = (
+        await db.scalars(
+            select(Job)
+            .where(Job.user_id == user.id)
+            .order_by(Job.created_at.desc())
+            .limit(50)
+        )
+    ).all()
+
+    seq_by_job: dict[uuid.UUID, int] = {}
+    if rows:
+        seq_rows = await db.execute(
+            select(JobStage.job_id, func.max(JobStage.seq)).where(
+                JobStage.job_id.in_([j.id for j in rows])
+            )
+        )
+        seq_by_job = {job_id: seq or 0 for job_id, seq in seq_rows.all()}
+
+    return JobsResponse(
+        jobs=[
+            await _job_to_schema(db, j, seq_by_job.get(j.id, 0), with_progress=False)
+            for j in rows
+        ]
+    )
+
+
 @router.get("/jobs/{job_id}", response_model=JobSchema)
 async def get_job(
     job_id: uuid.UUID,
@@ -146,7 +231,7 @@ async def get_job(
     last_seq = await db.scalar(
         select(func.coalesce(func.max(JobStage.seq), 0)).where(JobStage.job_id == job_id)
     )
-    return _job_to_schema(job, last_seq or 0)
+    return await _job_to_schema(db, job, last_seq or 0)
 
 
 @router.get("/jobs/{job_id}/events")
@@ -290,12 +375,14 @@ async def delete_job(
 ) -> Response:
     job = await _get_owned_job(db, job_id, user)
 
-    for key in (job.md_key, job.pdf_key):
-        if key:
-            try:
-                await storage.delete(key)
-            except Exception:  # noqa: BLE001
-                pass
+    # 运行中先取消，避免删除后管线继续消耗 LLM 调用并写库
+    cancel_task(job_id)
+
+    # 按前缀清理产物、解析产物与 agent 工作区，不留孤儿对象
+    try:
+        await storage.delete_prefix(f"jobs/{job_id}/")
+    except Exception:  # noqa: BLE001
+        logger.warning("清理任务存储前缀失败（job=%s）", job_id)
 
     await db.delete(job)
     await db.commit()
