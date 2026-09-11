@@ -33,6 +33,7 @@ class VisionLLMOCR:
             model=self._model,
             api_key=self._api_key,
             base_url=self._base_url,
+            timeout=getattr(settings, "llm_timeout_seconds", 120),
         )
 
         # 将图片转为 base64

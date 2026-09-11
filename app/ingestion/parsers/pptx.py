@@ -3,8 +3,50 @@
 from __future__ import annotations
 
 import io
+from typing import Any
 
 from app.ingestion.parsers.base import ImageInfo, Parser, ParseResult
+
+
+def _collect_slide_content(
+    shapes: Any,
+    texts: list[str],
+    images: list[ImageInfo],
+    page: int,
+) -> None:
+    """递归提取一组 shape 的文本（含组合形状）、表格行与图片。"""
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+    for shape in shapes:
+        if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
+            _collect_slide_content(shape.shapes, texts, images, page)
+            continue
+        if shape.has_text_frame:
+            for para in shape.text_frame.paragraphs:
+                text = para.text.strip()
+                if text:
+                    texts.append(text)
+        # 提取内嵌图片
+        if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+            try:
+                image_bytes = shape.image.blob
+                images.append(
+                    ImageInfo(
+                        page=page,
+                        data=image_bytes,
+                        order=len(images),
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                continue
+        # 提取表格内容
+        if getattr(shape, "has_table", False):
+            for row in shape.table.rows:
+                row_text = " | ".join(
+                    cell.text.strip() for cell in row.cells if cell.text.strip()
+                )
+                if row_text:
+                    texts.append(row_text)
 
 
 class PPTXParser(Parser):
@@ -13,7 +55,6 @@ class PPTXParser(Parser):
     def parse(self, filename: str, data: bytes) -> ParseResult:
         try:
             from pptx import Presentation
-            from pptx.enum.shapes import MSO_SHAPE_TYPE
         except ImportError as exc:
             raise RuntimeError("python-pptx 未安装，请运行 `pip install python-pptx`") from exc
 
@@ -26,25 +67,7 @@ class PPTXParser(Parser):
 
         for slide_num, slide in enumerate(prs.slides, start=1):
             slide_texts: list[str] = []
-            for shape in slide.shapes:
-                if shape.has_text_frame:
-                    for para in shape.text_frame.paragraphs:
-                        text = para.text.strip()
-                        if text:
-                            slide_texts.append(text)
-                # 提取内嵌图片
-                if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
-                    try:
-                        image_bytes = shape.image.blob
-                        images.append(
-                            ImageInfo(
-                                page=slide_num,
-                                data=image_bytes,
-                                order=len(images),
-                            )
-                        )
-                    except Exception:
-                        continue
+            _collect_slide_content(slide.shapes, slide_texts, images, slide_num)
             if slide_texts:
                 parts.append(f"--- Slide {slide_num} ---\n" + "\n".join(slide_texts))
 

@@ -46,13 +46,13 @@ class EmbeddingClient:
 
         client = self._get_client()
 
-        # OpenAI embeddings API 支持批量输入
+        # OpenAI embeddings API 支持批量输入；
+        # dimensions 参数部分兼容后端不支持，由配置开关控制
         t0 = time.perf_counter()
-        response = await client.embeddings.create(
-            model=self._model,
-            input=texts,
-            dimensions=self._dimensions,
-        )
+        kwargs: dict[str, Any] = {"model": self._model, "input": texts}
+        if getattr(settings, "embedding_send_dimensions", True):
+            kwargs["dimensions"] = self._dimensions
+        response = await client.embeddings.create(**kwargs)
         elapsed_ms = (time.perf_counter() - t0) * 1000
 
         # 按输入顺序返回向量

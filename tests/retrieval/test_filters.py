@@ -9,55 +9,56 @@ from app.retrieval.filters import FilterBuilder
 
 
 class TestFilterBuilder:
-    def test_additive(self) -> None:
-        uid = uuid.uuid4()
+    def test_additive_with_uploads(self) -> None:
+        """有上传件：本次上传 OR 同校同课程共享库。"""
         sid = uuid.uuid4()
         cid = uuid.uuid4()
         upload_ids = [uuid.uuid4(), uuid.uuid4()]
 
         expr = FilterBuilder.additive(
-            user_id=uid,
             school_id=sid,
             course_id=cid,
             source_type=SourceType.book,
             upload_ids=upload_ids,
         )
+
         assert "or" in expr
         assert len(expr["or"]) == 2
+        upload_branch = expr["or"][0]["and"]
+        assert {"in": {"upload_id": [str(u) for u in upload_ids]}} in upload_branch
+        shared_branch = expr["or"][1]["and"]
+        assert {"eq": {"school_id": str(sid)}} in shared_branch
+        assert {"eq": {"is_shared": True}} in shared_branch
 
-    def test_exclusive_with_uploads(self) -> None:
-        upload_ids = [uuid.uuid4()]
-        expr = FilterBuilder.exclusive(
-            user_id=uuid.uuid4(),
+    def test_additive_without_uploads(self) -> None:
+        """无上传件：仅共享库分支（单分支不再包 or）。"""
+        expr = FilterBuilder.additive(
             school_id=uuid.uuid4(),
             course_id=uuid.uuid4(),
-            source_type=SourceType.keypoint_list,
-            upload_ids=upload_ids,
-        )
-        assert "and" in expr
-        assert {"in": {"upload_id": upload_ids, "eq": {"source_type": "keypoint_list"}}}
-
-    def test_exclusive_without_uploads(self) -> None:
-        sid = uuid.uuid4()
-        expr = FilterBuilder.exclusive(
-            user_id=uuid.uuid4(),
-            school_id=sid,
-            course_id=uuid.uuid4(),
-            source_type=SourceType.keypoint_list,
+            source_type=SourceType.note,
             upload_ids=[],
         )
+
         assert "and" in expr
-        conds = expr["and"]
-        assert {"eq": {"school_id": sid}} in conds
+        assert {"eq": {"is_shared": True}} in expr["and"]
+
+    def test_additive_has_no_user_scope_key(self) -> None:
+        """user_scope 由调用方统一 AND，additive 不内嵌（避免分支内重复）。"""
+        expr = FilterBuilder.additive(
+            school_id=uuid.uuid4(),
+            course_id=uuid.uuid4(),
+            source_type=SourceType.lecture,
+            upload_ids=[uuid.uuid4()],
+        )
+
+        assert "user_scope" not in expr
 
     def test_user_scope(self) -> None:
         uid = uuid.uuid4()
         expr = FilterBuilder.user_scope(uid)
-        assert "or" in expr
-
-    def test_merge(self) -> None:
-        f1 = FilterBuilder.user_scope(uuid.uuid4())
-        f2 = {"and": [{"eq": {"source_type": "book"}}]}
-        merged = FilterBuilder.merge(f1, f2)
-        assert "and" in merged
-        assert len(merged["and"]) == 2
+        assert expr == {
+            "or": [
+                {"eq": {"user_id": str(uid)}},
+                {"eq": {"is_shared": True}},
+            ],
+        }

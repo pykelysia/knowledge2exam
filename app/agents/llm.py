@@ -15,4 +15,5 @@ def get_chat_model() -> ChatOpenAI:
         api_key=SecretStr(settings.llm_api_key),
         base_url=settings.llm_base_url,
         temperature=settings.agent_temperature,
+        timeout=settings.llm_timeout_seconds,
     )

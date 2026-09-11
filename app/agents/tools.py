@@ -369,23 +369,21 @@ def _knowledge_filter(ctx: AgentContext) -> dict[str, Any] | None:
     """
     branches: list[dict[str, Any]] = []
     for st in _KNOWLEDGE_SOURCE_TYPES:
-        if ctx.upload_ids:
+        if ctx.school_id and ctx.course_id:
+            branches.append(
+                FilterBuilder.additive(
+                    school_id=ctx.school_id,
+                    course_id=ctx.course_id,
+                    source_type=st,
+                    upload_ids=ctx.upload_ids,
+                )
+            )
+        elif ctx.upload_ids:
             branches.append(
                 {
                     "and": [
                         {"in": {"upload_id": [str(u) for u in ctx.upload_ids]}},
                         {"eq": {"source_type": st.value}},
-                    ],
-                }
-            )
-        if ctx.school_id and ctx.course_id:
-            branches.append(
-                {
-                    "and": [
-                        {"eq": {"school_id": str(ctx.school_id)}},
-                        {"eq": {"course_id": str(ctx.course_id)}},
-                        {"eq": {"source_type": st.value}},
-                        {"eq": {"is_shared": True}},
                     ],
                 }
             )

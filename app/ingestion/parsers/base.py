@@ -62,22 +62,5 @@ class Parser:
         return await asyncio.to_thread(self.parse, filename, data)
 
 
-class StubParser(Parser):
-    """兜底解析器：按文本解码返回（未知扩展名不应走到这里）。"""
-
-    def parse(self, filename: str, data: bytes) -> ParseResult:
-        text = data.decode("utf-8", errors="ignore")
-        if not text.strip():
-            text = f"（二进制文件 {filename}，共 {len(data)} 字节）"
-        char_count = len(text)
-        excerpt = text[:200]
-        return ParseResult(
-            char_count=char_count,
-            page_count=None,
-            excerpt=excerpt,
-            text=text,
-        )
-
-
 def supported_format(filename: str) -> bool:
     return Path(filename).suffix.lower() in SUPPORTED_EXTENSIONS

@@ -313,6 +313,7 @@ class TestKnowledgeFilter:
         assert len(base["or"]) == 3
 
     def test_combined_produces_or(self, tmp_path: Path) -> None:
+        """有上传件 + 学校课程：每个 source_type 一个 additive 分支（内含 or）。"""
         from app.agents.tools import _knowledge_filter
 
         expr = _knowledge_filter(
@@ -325,7 +326,11 @@ class TestKnowledgeFilter:
         )
         assert expr is not None
         base = self._base(expr)
-        assert len(base["or"]) == 6
+        assert len(base["or"]) == 3  # book/lecture/note 各一个 additive 分支
+        for branch in base["or"]:
+            # additive：本次上传 OR 同校同课程共享库
+            assert "or" in branch
+            assert len(branch["or"]) == 2
 
     def test_shared_flag_present(self, tmp_path: Path) -> None:
         from app.agents.tools import _knowledge_filter
@@ -345,7 +350,7 @@ class TestKnowledgeFilter:
         scope = expr["and"][1]
         assert scope == {
             "or": [
-                {"eq": {"user_id": ctx.user_id}},
+                {"eq": {"user_id": str(ctx.user_id)}},
                 {"eq": {"is_shared": True}},
             ],
         }

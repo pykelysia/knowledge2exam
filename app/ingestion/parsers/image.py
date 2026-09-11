@@ -43,13 +43,14 @@ class ImageParser(Parser):
 
 
 def _preprocess_image(data: bytes, max_size: int = 1024) -> bytes:
-    """压缩图片至最大边 max_size，减少 OCR 成本。"""
+    """压缩图片至最大边 max_size，减少 OCR 成本；按 EXIF 信息矫正方向。"""
     try:
-        from PIL import Image
+        from PIL import Image, ImageOps
     except ImportError:
         return data
 
     img = Image.open(io.BytesIO(data))
+    img = ImageOps.exif_transpose(img)
 
     # 转换为 RGB（处理 RGBA / palette 等）
     if img.mode != "RGB":
