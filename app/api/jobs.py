@@ -15,8 +15,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.db import get_db
 from app.core.deps import get_current_user
 from app.core.events import EventBus, subscribe, unsubscribe
-from app.core.task_registry import cancel as cancel_task
-from app.core.task_registry import register
 from app.core.exceptions import (
     AppException,
     ErrorCode,
@@ -25,18 +23,20 @@ from app.core.exceptions import (
     UploadNotFound,
 )
 from app.core.storage import storage
+from app.core.task_registry import cancel as cancel_task
+from app.core.task_registry import register
 from app.models.job import Job, JobStage, JobUpload
 from app.models.question import Question
 from app.models.upload import Upload
 from app.models.user import AppUser
-from app.orchestration.stages import _run_pipeline_with_cancellation, run_pipeline
+from app.orchestration.stages import _run_pipeline_with_cancellation
 from app.orchestration.state_machine import JobStatus, Stage, is_terminal
 from app.schemas.job import (
+    Artifacts,
     JobAccepted,
     JobCreate,
     Plan,
     Warning,
-    Artifacts,
 )
 from app.schemas.job import (
     Job as JobSchema,
@@ -65,7 +65,6 @@ def _job_to_schema(job: Job, last_event_seq: int) -> JobSchema:
         stage=Stage(job.status) if job.status in {s.value for s in Stage} else None,
         duration_minutes=job.duration_minutes,
         need_explanation=job.need_explanation,
-        enable_review=job.enable_review,
         plan=plan,
         progress=None,
         warnings=[Warning(**w) for w in (job.warnings or [])],
@@ -121,7 +120,6 @@ async def create_job(
         status=JobStatus.pending.value,
         duration_minutes=payload.duration_minutes,
         need_explanation=payload.need_explanation,
-        enable_review=payload.enable_review,
     )
     db.add(job)
     await db.flush()
