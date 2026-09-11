@@ -2,7 +2,9 @@
 
 真实实现：文件式 ReAct agent（见 app/agents/agent.py）。
 预处理把用户材料写入 agent 工作区（materials/），agent 规划蓝图并逐题
-产出题目文件，经 persist_exam_result 入库后进入渲染阶段（md 合成 + PDF）。
+产出题目文件，最后经 render_paper 工具完成整卷渲染（md + PDF，失败自动
+降级交付 md）；编排层在 agent 返回后仅负责入库（persist_exam_result）与
+提交渲染产物（md_key/pdf_key/状态）。
 """
 
 from __future__ import annotations
@@ -217,10 +219,27 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
             stage=Stage.planning.value,
         )
 
+    # 渲染阶段的 stage_changed 事件：agent 的 render_paper 首次执行时发出，
+    # 重试不重复发；agent 未调用渲染工具时由渲染段补发。
+    render_stage_emitted = False
+    render_previous_stage = Stage.reviewing if job.enable_review else Stage.generating
+
+    async def on_render_start() -> None:
+        nonlocal render_stage_emitted
+        if not render_stage_emitted:
+            render_stage_emitted = True
+            await bus.emit(
+                job.id,
+                "stage_changed",
+                {"stage": Stage.rendering.value, "previous": render_previous_stage.value},
+                stage=Stage.rendering.value,
+            )
+
     hooks = AgentHooks(
         on_plan_ready=on_plan_ready,
         on_question_accepted=on_question_accepted,
         on_warning=on_warning,
+        on_render_start=on_render_start,
     )
 
     main_result = await run_exam_agent(job.id, main_agent_context, hooks)
@@ -259,91 +278,51 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
     job.planned_total = integration_result.get("total_questions", 0)
     await db.commit()
 
-    # ---------- rendering ----------
+    # ---------- rendering（提交渲染产物；渲染本体已在 agent 的 render_paper 工具内完成） ----------
     if await _check_cancelled(db, job.id, bus):
         return
-    previous_stage = Stage.reviewing if job.enable_review else Stage.generating
+    if not render_stage_emitted:
+        # 模型未调用渲染工具（兜底在 ainvoke 之后执行）：补发事件保证阶段序列完整
+        await bus.emit(
+            job.id,
+            "stage_changed",
+            {"stage": Stage.rendering.value, "previous": render_previous_stage.value},
+            stage=Stage.rendering.value,
+        )
     job.status = JobStatus.rendering.value
-    await bus.emit(
-        job.id,
-        "stage_changed",
-        {"stage": Stage.rendering.value, "previous": previous_stage.value},
-        stage=Stage.rendering.value,
-    )
     await db.commit()
 
-    q_rows = (
-        await db.scalars(select(Question).where(Question.job_id == job.id).order_by(Question.seq))
-    ).all()
-    questions = list(q_rows)
-
-    # 过滤掉已废弃的题目
-    active_questions = [q for q in questions if q.status != "abandoned"]
-
-    # 重新获取 plan_map（仅包含未被 superseded 的 plan_item）
-    all_plan_items = (
-        await db.scalars(
-            select(PlanItem).where(
-                PlanItem.job_id == job.id,
-                PlanItem.superseded_by.is_(None),
-            )
-        )
-    ).all()
-    plan_map = {p.seq: p for p in all_plan_items}
-
-    questions_with_plan = [(plan_map.get(q.seq), q) for q in active_questions if q.seq in plan_map]
-
-    md_text = build_markdown(
-        title=f"试卷（{job.duration_minutes} 分钟）",
-        questions=questions_with_plan,
-        need_explanation=job.need_explanation,
-    )
-
-    render_t0 = time.perf_counter()
     md_key = f"jobs/{job.id}/output/paper.md"
-    await storage.put(md_key, md_text.encode("utf-8"))
-
-    renderer = get_renderer()
-    result = await renderer.render(
-        f"试卷（{job.duration_minutes} 分钟）",
-        [
-            {
-                "seq": q.seq,
-                "stem": q.stem,
-                "question_type": q.question_type,
-                "options": q.options,
-                "answer": q.answer,
-                "explanation": q.explanation if job.need_explanation else None,
-                "sub_questions": q.sub_questions,
-                "sub_answers": q.sub_answers,
-            }
-            for _, q in questions_with_plan
-        ],
-    )
-
     pdf_key = f"jobs/{job.id}/output/paper.pdf"
-    if result.pdf is not None:
-        await storage.put(pdf_key, result.pdf)
-    render_elapsed = (time.perf_counter() - render_t0) * 1000
+    if main_result.render_status == "succeeded":
+        job.md_key = md_key
+        job.pdf_key = pdf_key
+        job.status = JobStatus.completed.value
+    else:
+        # md_only：PDF 渲染失败但 paper.md 已生成；not_attempted 为防御式兜底
+        job.md_key = md_key if main_result.render_status == "md_only" else None
+        job.pdf_key = None
+        job.status = JobStatus.partially_completed.value
+    await db.commit()
+
+    if main_result.render_error:
+        await bus.emit(
+            job.id,
+            "warning",
+            {"code": ErrorCode.RENDER_FAILED, "message": main_result.render_error},
+            stage=Stage.rendering.value,
+        )
 
     await log_step(
         job_id=str(job.id),
         name="rendering",
         stage=Stage.rendering.value,
-        input={"questions_count": len(questions_with_plan), "md_chars": len(md_text)},
-        output={"pdf_failed": result.pdf_failed},
-        elapsed_ms=render_elapsed,
+        input={"questions_count": len(main_result.questions)},
+        output={
+            "render_status": main_result.render_status,
+            "render_error": main_result.render_error,
+        },
     )
-
-    job.md_key = md_key
-    job.pdf_key = None if result.pdf_failed else pdf_key
-    job.status = (
-        JobStatus.completed.value if not result.pdf_failed else JobStatus.partially_completed.value
-    )
-    await db.commit()
-
-    # 统计废弃题目数
-    abandoned_count = sum(1 for q in questions if q.status == "abandoned")
 
     await bus.emit_and_close(
         job.id,
@@ -351,9 +330,9 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
         {
             "status": job.status,
             "total": job.planned_total or 0,
-            "abandoned": abandoned_count,
-            "md_url": f"/api/v1/jobs/{job.id}/paper.md",
-            "pdf_url": f"/api/v1/jobs/{job.id}/paper.pdf" if not result.pdf_failed else None,
+            "abandoned": len(main_result.abandoned_seqs),
+            "md_url": f"/api/v1/jobs/{job.id}/paper.md" if job.md_key else None,
+            "pdf_url": f"/api/v1/jobs/{job.id}/paper.pdf" if job.pdf_key else None,
         },
         stage=Stage.rendering.value,
     )
@@ -438,6 +417,7 @@ async def run_mock_pipeline(job_id: uuid.UUID) -> None:
         ]
 
         seq = 0
+        paper_pairs: list[tuple[PlanItem, Question]] = []
         for question_type, options, answer in type_specs:
             seq += 1
             plan = PlanItem(
@@ -468,6 +448,7 @@ async def run_mock_pipeline(job_id: uuid.UUID) -> None:
             )
             db.add(q)
             await db.flush()
+            paper_pairs.append((plan, q))
 
             await bus.emit(
                 job.id,
@@ -518,42 +499,39 @@ async def run_mock_pipeline(job_id: uuid.UUID) -> None:
         await db.commit()
         await asyncio.sleep(getattr(settings, "mock_stage_delay_seconds", 0.5))
 
-        questions = [
-            {
-                "seq": i + 1,
-                "stem": f"第 {i + 1} 题（{t}）模拟题干",
-                "question_type": t,
-                "options": opts,
-                "answer": ans,
-                "explanation": f"第 {i + 1} 题解析" if job.need_explanation else None,
-                "sub_questions": ["子问题 1", "子问题 2"] if t == "short_answer" else None,
-                "sub_answers": ["子答案 1", "子答案 2"] if t == "short_answer" else None,
-            }
-            for i, (t, opts, ans) in enumerate(type_specs)
-        ]
-
-        renderer = get_renderer()
-        result = await renderer.render(f"模拟试卷（{job.duration_minutes} 分钟）", questions)
+        title = f"模拟试卷（{job.duration_minutes} 分钟）"
+        md_bytes = build_markdown(title, paper_pairs, job.need_explanation).encode("utf-8")
         md_key = f"jobs/{job_id}/output/paper.md"
         pdf_key = f"jobs/{job_id}/output/paper.pdf"
-        await storage.put(md_key, result.md)
-        if result.pdf is not None:
-            await storage.put(pdf_key, result.pdf)
-        job.md_key = md_key
-        job.pdf_key = pdf_key
+        await storage.put(md_key, md_bytes)
 
-        job.status = JobStatus.completed.value
+        job.pdf_key = None
+        try:
+            pdf = await get_renderer().render_markdown(md_bytes, title=title)
+            await storage.put(pdf_key, pdf)
+            job.pdf_key = pdf_key
+        except Exception as exc:
+            await bus.emit(
+                job.id,
+                "warning",
+                {"code": ErrorCode.RENDER_FAILED, "message": str(exc)},
+                stage=Stage.rendering.value,
+            )
+        job.md_key = md_key
+        job.status = (
+            JobStatus.completed.value if job.pdf_key else JobStatus.partially_completed.value
+        )
         await db.commit()
 
         await bus.emit_and_close(
             job.id,
             "done",
             {
-                "status": JobStatus.completed.value,
+                "status": job.status,
                 "total": _MOCK_TOTAL,
                 "abandoned": 0,
                 "md_url": f"/api/v1/jobs/{job_id}/paper.md",
-                "pdf_url": f"/api/v1/jobs/{job_id}/paper.pdf",
+                "pdf_url": f"/api/v1/jobs/{job_id}/paper.pdf" if job.pdf_key else None,
             },
             stage=Stage.rendering.value,
         )
