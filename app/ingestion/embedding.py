@@ -34,7 +34,7 @@ class EmbeddingClient:
         ),
             base_url=getattr(settings, "embedding_base_url", "http://localhost:8000/v1"),
             model=getattr(settings, "embedding_model", "text-embedding-3-small"),
-            dimensions=getattr(settings, "embedding_dimensions", 1536),
+            dimensions=settings.embedding_dimensions,
         )
 
     async def embed(self, texts: list[str]) -> list[list[float]]:

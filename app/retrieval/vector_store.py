@@ -96,7 +96,7 @@ class PgVectorStore(VectorStore):
             query_vector = (await embedder.embed([query]))[0]
         else:
             import random
-            dim = getattr(settings, "embedding_dimensions", 1536)
+            dim = settings.embedding_dimensions
             query_vector = [random.random() for _ in range(dim)]
 
         # 2. 构造 SQL WHERE 条件

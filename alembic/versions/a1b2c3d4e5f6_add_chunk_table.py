@@ -20,9 +20,6 @@ down_revision: Union[str, None] = '87b8c92203de'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
-# 向量维数从 .env 读取，默认 1024
-EMBEDDING_DIM = getattr(settings, "embedding_dimensions", 1024)
-
 # pgvector 的 Vector 类型
 try:
     from pgvector.sqlalchemy import Vector
@@ -31,6 +28,11 @@ except ImportError:
 
 
 def upgrade() -> None:
+    # 向量维度由环境变量 EMBEDDING_DIMENSIONS 决定（默认 1536），
+    # 建库时读取当时环境的值；pgvector 列维度建后不可变，换嵌入模型
+    # 需要新迁移重建 chunk 表。
+    embedding_dim = settings.embedding_dimensions
+
     # 启用 pgvector 扩展
     conn = op.get_bind()
     conn.execute(sa.text('CREATE EXTENSION IF NOT EXISTS vector'))
@@ -48,7 +50,7 @@ def upgrade() -> None:
     sa.Column('page', sa.Integer(), nullable=True),
     sa.Column('chunk_index', sa.Integer(), nullable=False),
     sa.Column('text', sa.Text(), nullable=False),
-    sa.Column('embedding', Vector(dim=EMBEDDING_DIM), nullable=False),
+    sa.Column('embedding', Vector(dim=embedding_dim), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.ForeignKeyConstraint(['course_id'], ['course.id'], name=op.f('fk_chunk_course_id_course')),
