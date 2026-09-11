@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from app.core.enums import SourceType
-from app.ingestion.chunking import Chunk, Chunker
+from app.ingestion.chunking import Chunker
 
 
 @pytest.fixture

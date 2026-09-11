@@ -45,7 +45,7 @@ async def run_exam_agent(
 
     context 字段（由编排层构造）：
         duration_minutes / need_explanation / max_retries /
-        school_id / course_id / upload_ids
+        user_id / school_id / course_id / upload_ids
     预处理阶段应已把用户材料写入工作区 materials/ 目录。
     """
     hooks = hooks or AgentHooks()
@@ -59,6 +59,7 @@ async def run_exam_agent(
         skills=SkillLoader(settings.skills_dir),
         vector_store=PgVectorStore(AsyncSessionLocal),
         hooks=hooks,
+        user_id=context.get("user_id"),
         school_id=context.get("school_id"),
         course_id=context.get("course_id"),
         upload_ids=list(context.get("upload_ids") or []),

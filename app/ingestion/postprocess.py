@@ -11,16 +11,19 @@
 
 from __future__ import annotations
 
+import asyncio
+import io
 import math
 
+from app.ingestion.ocr import VisionLLMOCR
 from app.ingestion.parsers.base import ImageInfo
-
 
 # ---------- 阈值配置 ----------
 
 _MIN_IMAGE_SIZE = 50          # 最小边长（像素），低于此视为装饰
 _COLOR_VAR_THRESHOLD = 10     # 色彩方差低于此视为纯色/近纯色
 _DEDUP_SIMILARITY = 0.8       # Jaccard 相似度高于此视为重复
+_OCR_TIMEOUT_SECONDS = 60     # 单张图片 OCR 超时
 
 
 # ---------- 公共接口 ----------
@@ -91,7 +94,7 @@ def _prefilter(images: list[ImageInfo]) -> None:
             continue
 
         try:
-            pil_img = Image.open(__import__("io").BytesIO(img.data))
+            pil_img = Image.open(io.BytesIO(img.data))
             w, h = pil_img.size
             if w < _MIN_IMAGE_SIZE or h < _MIN_IMAGE_SIZE:
                 img.skipped_reason = f"too_small:{w}x{h}"
@@ -121,7 +124,11 @@ def _prefilter(images: list[ImageInfo]) -> None:
 
 
 def _run_ocr(images: list[ImageInfo]) -> None:
-    """对图片列表执行 OCR。"""
+    """对图片列表执行 OCR。
+
+    调用方应处于无运行中事件循环的上下文（如 to_thread 工作线程），
+    此处用 asyncio.run + wait_for 控制单张超时，超时即取消底层请求。
+    """
     try:
         ocr = VisionLLMOCR.from_settings()
     except Exception as exc:
@@ -132,24 +139,12 @@ def _run_ocr(images: list[ImageInfo]) -> None:
         return
 
     for img in images:
-        if getattr(img, "_skipped", False) or img.ocr_text:
+        if getattr(img, "_skipped", False) or img.ocr_text or img.data is None:
             continue
         try:
-            import asyncio
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # 在异步循环中运行时，不能再用 run_until_complete
-                # 这里创建新线程执行
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    future = pool.submit(
-                        lambda: asyncio.new_event_loop().run_until_complete(
-                            ocr.extract_text(img.data)
-                        )
-                    )
-                    img.ocr_text = future.result(timeout=60)
-            else:
-                img.ocr_text = loop.run_until_complete(ocr.extract_text(img.data))
+            img.ocr_text = asyncio.run(
+                asyncio.wait_for(ocr.extract_text(img.data), timeout=_OCR_TIMEOUT_SECONDS)
+            )
         except Exception as exc:
             img.skipped_reason = f"ocr_failed:{exc}"
             img._skipped = True
@@ -227,11 +222,7 @@ def _is_continuous(prev_text: str, curr_text: str) -> bool:
         return False
 
     last_char = prev_stripped[-1]
-    # 以这些结尾视为语义完整结束，不连续
-    full_stop_puncs = {"。", "！", "？", "；", ". ", "! ", "? ", "; "}
-    # 检查末尾是否包含完整句号（允许末尾有空白）
-    trimmed_end = prev_stripped[-3:].strip() if len(prev_stripped) >= 2 else prev_stripped
-    # 简单判断：最后一个是中文句号/英文句号，或最后两个是 ". "
+    # 最后一个是中文句号/英文句号，或最后两个是 ". "：语义完整结束，不连续
     if last_char in {"。", "！", "？", "；", "\n"} or prev_stripped.endswith(". "):
         return False
 

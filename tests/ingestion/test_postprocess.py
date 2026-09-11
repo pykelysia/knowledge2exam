@@ -2,21 +2,16 @@
 
 from __future__ import annotations
 
-import math
-
-import pytest
-
 from app.ingestion.parsers.base import ImageInfo
 from app.ingestion.postprocess import (
+    _deduplicate,
     _is_continuous,
     _jaccard_similarity,
     _mark_gaps,
     _merge_continuous,
-    _deduplicate,
     build_merged_text,
     process_images,
 )
-
 
 # ---------- 工具函数 ----------
 

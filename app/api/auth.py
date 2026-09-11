@@ -28,10 +28,7 @@ from app.core.security import (
 from app.models.auth import RefreshToken
 from app.models.user import AppUser
 from app.schemas.auth import (
-    AuthTokens,
     LoginRequest,
-    LogoutRequest,
-    RefreshRequest,
     RegisterRequest,
     User,
     UserResponse,
@@ -96,7 +93,9 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
 
 
 @router.post("/login", response_model=UserResponse)
-async def login(payload: LoginRequest, response: Response, db: AsyncSession = Depends(get_db)) -> UserResponse:
+async def login(
+    payload: LoginRequest, response: Response, db: AsyncSession = Depends(get_db)
+) -> UserResponse:
     stmt = select(AppUser)
     if payload.email is not None:
         stmt = stmt.where(AppUser.email == payload.email)
@@ -112,7 +111,9 @@ async def login(payload: LoginRequest, response: Response, db: AsyncSession = De
 
 
 @router.post("/refresh", response_model=UserResponse)
-async def refresh(request: Request, response: Response, db: AsyncSession = Depends(get_db)) -> UserResponse:
+async def refresh(
+    request: Request, response: Response, db: AsyncSession = Depends(get_db)
+) -> UserResponse:
     refresh_token = request.cookies.get("refresh_token")
     if not refresh_token:
         raise RefreshInvalid()
@@ -144,7 +145,9 @@ async def refresh(request: Request, response: Response, db: AsyncSession = Depen
 
 
 @router.post("/logout", status_code=204)
-async def logout(request: Request, response: Response, db: AsyncSession = Depends(get_db)) -> Response:
+async def logout(
+    request: Request, response: Response, db: AsyncSession = Depends(get_db)
+) -> Response:
     refresh_token = request.cookies.get("refresh_token")
     if refresh_token:
         token_hash = hash_refresh_token(refresh_token)

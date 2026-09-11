@@ -11,8 +11,8 @@
 
 | 阶段 | 说明 |
 |------|------|
-| **资料上传** | 支持 PDF / DOC(X) / PPT(X) / Markdown / TXT / 图片（JPG、PNG、WebP、BMP）及纯文本输入 |
-| **文件预处理** | 文档解析（doc/ppt 旧格式经 LibreOffice 转换）→ 视觉 LLM OCR → 文本切块 → 向量嵌入（pgvector）；往期试卷整篇注入 agent 工作区 |
+| **资料上传** | 支持 PDF / DOCX / PPTX / Markdown / TXT / 图片（JPG、PNG、WebP、BMP）及纯文本输入（不支持 doc/ppt 旧格式） |
+| **文件预处理** | 文档解析 → 视觉 LLM OCR → 文本切块 → 向量嵌入（pgvector）；往期试卷整篇注入 agent 工作区 |
 | **意图提取** | 用户文本输入结构化为 ExamIntent（题型要求 / 重点清单 / 额外要求） |
 | **Agent 出卷** | 单个 ReAct agent 通过 7 个工具完成出卷：todo 计划管理、知识库向量检索、技能加载（出卷 / LaTeX 排版）、工作区文件读写、整卷渲染 |
 | **PDF 渲染** | Pandoc + XeLaTeX 渲染试卷（支持题目与答案解析分篇）；环境缺依赖时自动降级为仅交付 Markdown |
@@ -69,7 +69,7 @@ PDF 渲染（Pandoc + XeLaTeX，缺依赖自动降级 md_only）
 | LLM | OpenAI 兼容协议（ChatOpenAI，可替换后端） |
 | 文档解析 | PyMuPDF、python-docx、python-pptx、Pillow、LibreOffice（旧格式转换） |
 | OCR | 视觉 LLM（`OCR_MODEL`，默认 gpt-4o） |
-| PDF 渲染 | Pandoc + XeLaTeX（缺依赖自动降级 StubRenderer） |
+| PDF 渲染 | Pandoc + XeLaTeX（缺依赖时降级为仅交付 Markdown） |
 | 认证 | httpOnly Cookie + 双 JWT + bcrypt |
 | 实时推送 | SSE (sse-starlette) |
 | HTTP 客户端 | httpx |
@@ -385,5 +385,4 @@ uv run alembic downgrade -1
 | `MAX_KEYPOINT_LIST_CHARS` | 重点清单长度上限（字符） | 3000 |
 | `MAX_EXTRA_REQUIREMENT_CHARS` | 额外要求长度上限（字符） | 2000 |
 | `OCR_MODEL` | 视觉 LLM OCR 模型 | `gpt-4o` |
-| `LIBREOFFICE_PATH` | LibreOffice 可执行文件路径（doc/ppt 旧格式转换） | `libreoffice` |
 | `DEBUG_MODE` | 调试日志开关（仅开发环境） | `false` |

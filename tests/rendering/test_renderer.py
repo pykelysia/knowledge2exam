@@ -24,11 +24,18 @@ class FakeProc:
         self._stdout = stdout
         self._stderr = stderr
         self.stdin_data: bytes | None = None
+        self.killed = False
 
     # 形参名与 renderer 的调用方式一致（communicate(input=md)）
     async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]:  # noqa: A002
         self.stdin_data = input
         return self._stdout, self._stderr
+
+    def kill(self) -> None:
+        self.killed = True
+
+    async def wait(self) -> int:
+        return self.returncode
 
 
 def make_renderer(
@@ -87,15 +94,20 @@ class TestRenderMarkdown:
         with pytest.raises(RuntimeError, match="不是有效 PDF"):
             await r.render_markdown(b"md", title="t")
 
-    async def test_timeout_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_timeout_kills_process_and_propagates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         class TimeoutProc(FakeProc):
             async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]:  # noqa: A002
                 raise TimeoutError
 
-        r, _ = make_renderer(monkeypatch, TimeoutProc())
+        proc = TimeoutProc()
+        r, _ = make_renderer(monkeypatch, proc)
 
         with pytest.raises(TimeoutError):
             await r.render_markdown(b"md", title="t")
+
+        assert proc.killed, "超时后必须终止子进程，避免孤儿 xelatex"
 
     async def test_file_not_found_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
         r, _ = make_renderer(monkeypatch, exec_error=FileNotFoundError("pandoc 缺失"))

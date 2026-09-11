@@ -8,7 +8,7 @@ from app.ingestion.parsers.base import Parser, ParseResult
 class PlainTextParser(Parser):
     """纯文本 / Markdown 解析器，无需转换。"""
 
-    async def parse(self, filename: str, data: bytes) -> ParseResult:
+    def parse(self, filename: str, data: bytes) -> ParseResult:
         # 尝试 UTF-8 解码，失败则使用 latin-1
         try:
             text = data.decode("utf-8")

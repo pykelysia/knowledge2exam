@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import uuid
 
-import pytest
-
 from app.core.enums import SourceType
 from app.retrieval.filters import FilterBuilder
 

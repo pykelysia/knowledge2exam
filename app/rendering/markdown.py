@@ -127,9 +127,15 @@ def _clean_literal_escapes(md_text: str) -> str:
 
     md_text = fence_pattern.sub(_replace_escapes_in_code, md_text)
 
-    # 清理单独出现在行尾的 ``\n``（非代码块内），避免被 Pandoc 解释为 LaTeX 命令
-    md_text = re.sub(r"\\n", "\\\\n", md_text)
-    md_text = re.sub(r"\\t", "\\\\t", md_text)
+    # 清理游离的字面量 ``\n`` / ``\t``（非代码块内），避免被 Pandoc 解释为
+    # 无效 LaTeX 命令导致渲染失败。按前/后随字符区分两类情形：
+    # - 后随非字母（行尾、标点前）：必为转义残留，转义；
+    # - 前后都是单词字符（如 abc\ndef）：正文中的转义残留，转义；
+    # - 其余（\neq、\times、\theta 等命令用法，前随非单词字符）：保留。
+    md_text = re.sub(r"\\n(?![a-zA-Z])", r"\\\\n", md_text)
+    md_text = re.sub(r"\\t(?![a-zA-Z])", r"\\\\t", md_text)
+    md_text = re.sub(r"(?<=[A-Za-z0-9])\\n", r"\\\\n", md_text)
+    md_text = re.sub(r"(?<=[A-Za-z0-9])\\t", r"\\\\t", md_text)
 
     return md_text
 

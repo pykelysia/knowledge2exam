@@ -10,6 +10,7 @@ load_skill / render_paper。
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -34,6 +35,7 @@ from app.core.enums import SourceType
 from app.core.storage import Storage
 from app.rendering.markdown import build_markdown
 from app.rendering.renderer import Renderer, get_renderer
+from app.retrieval.filters import FilterBuilder
 from app.retrieval.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -63,6 +65,7 @@ class AgentContext:
     skills: SkillLoader
     vector_store: VectorStore
     hooks: AgentHooks
+    user_id: UUID | None = None
     upload_ids: list[UUID] = field(default_factory=list)
     school_id: UUID | None = None
     course_id: UUID | None = None
@@ -359,7 +362,11 @@ def _search_knowledge_tool(ctx: AgentContext) -> StructuredTool:
 
 
 def _knowledge_filter(ctx: AgentContext) -> dict[str, Any] | None:
-    """构造知识库过滤条件：本 job 上传的叠加类内容 OR 同校同课程共享内容。"""
+    """构造知识库过滤条件：本 job 上传的叠加类内容 OR 同校同课程共享内容。
+
+    外层再 AND 跨用户隔离不变量（个人内容限本人，其余必须是显式共享），
+    保证任何分支组合下都不会检索到他人私有未共享内容。
+    """
     branches: list[dict[str, Any]] = []
     for st in _KNOWLEDGE_SOURCE_TYPES:
         if ctx.upload_ids:
@@ -384,7 +391,10 @@ def _knowledge_filter(ctx: AgentContext) -> dict[str, Any] | None:
             )
     if not branches:
         return None
-    return {"or": branches} if len(branches) > 1 else branches[0]
+    base: dict[str, Any] = {"or": branches} if len(branches) > 1 else branches[0]
+    if ctx.user_id is not None:
+        return {"and": [base, FilterBuilder.user_scope(ctx.user_id)]}
+    return base
 
 
 def _load_skill_tool(ctx: AgentContext) -> StructuredTool:
@@ -408,7 +418,7 @@ def _load_skill_tool(ctx: AgentContext) -> StructuredTool:
 
 
 class RenderEnvironmentError(RuntimeError):
-    """渲染环境不可用（pandoc/xelatex 缺失、自动安装失败），无法通过修改内容修复。"""
+    """渲染环境不可用（pandoc/xelatex 缺失等），无法通过修改内容修复。"""
 
 
 async def _render_paper_once(ctx: AgentContext) -> int:
@@ -430,7 +440,8 @@ async def _render_paper_once(ctx: AgentContext) -> int:
     await ctx.storage.put(f"jobs/{ctx.job_id}/output/paper.md", md_bytes)
 
     try:
-        renderer = ctx.renderer_factory()
+        # 构造 renderer 涉及 pandoc 检测与中文字体探测（子进程），放入线程执行
+        renderer = await asyncio.to_thread(ctx.renderer_factory)
     except Exception as exc:
         raise RenderEnvironmentError(f"渲染依赖不可用: {exc}") from exc
     pdf = await renderer.render_markdown(md_bytes, title=title)

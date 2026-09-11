@@ -75,9 +75,6 @@ class Settings(BaseSettings):
     # OCR（视觉 LLM，复用 LLM 配置或独立配置）
     ocr_model: str = "gpt-4o"
 
-    # 旧格式转换工具路径（可选）
-    libreoffice_path: str = "libreoffice"
-
     # Debug 模式（仅开发环境使用）
     debug_mode: bool = False
 

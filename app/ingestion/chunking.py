@@ -22,6 +22,8 @@ class Chunk:
     course_id: uuid.UUID | None = None
     source_type: SourceType | None = None
     is_shared: bool = False
+    # 嵌入向量由预处理阶段计算后绑定；upsert 依赖此字段，缺失即入库失败
+    embedding: list[float] | None = None
 
 
 class Chunker:
@@ -61,7 +63,10 @@ class Chunker:
                 job_id="",
                 name="chunker.chunk",
                 stage="preprocessing",
-                input={"text_chars": len(text), "source_type": source_type.value if source_type else None},
+                input={
+                    "text_chars": len(text),
+                    "source_type": source_type.value if source_type else None,
+                },
                 output={"chunk_count": len(chunks)},
             )
 

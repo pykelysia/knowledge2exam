@@ -188,12 +188,27 @@ class PgVectorStore(VectorStore):
         if "or" in expr:
             or_conditions = []
             for sub_expr in expr["or"]:
-                or_conditions.extend(self._build_filter(sub_expr))
+                sub_conditions = self._build_filter(sub_expr)
+                if sub_conditions:
+                    # 分支内条件必须 AND 成组后作为单个 OR 操作数，
+                    # 展平会让 "本人上传且 book" 退化为 "本人上传或 book"
+                    or_conditions.append(
+                        and_(*sub_conditions) if len(sub_conditions) > 1 else sub_conditions[0]
+                    )
             if or_conditions:
                 conditions.append(or_(*or_conditions))
 
         if "and" in expr:
             for sub_expr in expr["and"]:
                 conditions.extend(self._build_filter(sub_expr))
+
+        # user_scope：跨用户隔离不变量——个人内容限 user_id，共享内容不限但需 is_shared
+        if "user_scope" in expr:
+            scope_value = expr["user_scope"]
+            if isinstance(scope_value, str):
+                scope_value = uuid.UUID(scope_value)
+            conditions.append(
+                or_(ChunkModel.user_id == scope_value, ChunkModel.is_shared.is_(True))
+            )
 
         return conditions

@@ -1,7 +1,7 @@
-"""PDF 渲染抽象接口。
+"""PDF 渲染实现：Pandoc + XeLaTeX 将 markdown 渲染为 PDF。
 
-真实实现：通过 Pandoc + XeLaTeX 将 markdown 渲染为 PDF。
-若系统中未安装 pandoc 或 xelatex，自动降级为 StubRenderer。
+pandoc/xelatex 缺失时由构造函数直接抛 RuntimeError，由调用方
+（agent 的 render_paper 工具）降级为仅交付 Markdown（md_only）。
 """
 
 from __future__ import annotations
@@ -62,9 +62,10 @@ class PandocXeLaTeXRenderer(Renderer):
             except (json.JSONDecodeError, ValueError):
                 logger.warning("PDF_EXTRA_ARGS 解析失败，忽略: %s", extra)
 
-        # 启动时已保证 pandoc 可用，此处缓存路径避免重复检测
+        # 启动时缓存 pandoc 路径，避免重复检测；不做自动安装——
+        # 系统包安装必须显式进行（install_pandoc_dependencies），不能在请求路径静默触发
         self._pandoc_path: str | None = ensure_pandoc_available(
-            auto_install=True, raise_on_missing=True
+            auto_install=False, raise_on_missing=True
         )
 
     @staticmethod
@@ -155,7 +156,10 @@ class PandocXeLaTeXRenderer(Renderer):
                 timeout=self.timeout,
             )
         except TimeoutError:
-            logger.error("PDF 渲染超时（%ds）", self.timeout)
+            # 超时必须杀掉子进程，否则 xelatex 会继续占用 CPU 并产生孤儿进程
+            proc.kill()
+            await proc.wait()
+            logger.error("PDF 渲染超时（%ds），已终止子进程", self.timeout)
             raise
         except FileNotFoundError as exc:
             logger.error("PDF 渲染依赖缺失: %s", exc)
@@ -182,9 +186,9 @@ class PandocXeLaTeXRenderer(Renderer):
 
 
 def get_renderer() -> Renderer:
-    """根据环境选择渲染器。
+    """构造渲染器。
 
-    若设置 PDF_RAISE_ON_MISSING=1，则 pandoc 缺失时抛异常；
-    否则降级为 StubRenderer。
+    pandoc/xelatex 缺失时抛 RuntimeError（非降级返回占位 PDF），
+    由上层 render_paper 工具捕获后降级为 md_only 交付。
     """
     return PandocXeLaTeXRenderer()

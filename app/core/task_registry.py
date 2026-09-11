@@ -5,8 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections import defaultdict
-from typing import Awaitable
+from collections.abc import Awaitable
 
 logger = logging.getLogger(__name__)
 

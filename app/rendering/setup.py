@@ -50,13 +50,17 @@ _PACKAGES: dict[str, dict[str, list[str]]] = {
 }
 
 
+_INSTALL_TIMEOUT_SECONDS = 900
+
+
 def _run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess:
-    """执行命令并返回结果。"""
+    """执行命令并返回结果（系统包安装可能耗时较长，设兜底超时）。"""
     return subprocess.run(
         cmd,
         capture_output=True,
         text=True,
         check=False,
+        timeout=_INSTALL_TIMEOUT_SECONDS,
         **kwargs,  # type: ignore[arg-type]
     )
 
@@ -116,7 +120,14 @@ def _install_brew(packages: list[str]) -> bool:
 
 def _install_winget(packages: list[str]) -> bool:
     """通过 winget 安装包。"""
-    cmd = ["winget", "install", "--silent", "--accept-source-agreements", "--accept-package-agreements", *packages]
+    cmd = [
+        "winget",
+        "install",
+        "--silent",
+        "--accept-source-agreements",
+        "--accept-package-agreements",
+        *packages,
+    ]
     logger.info("执行: %s", " ".join(cmd))
     result = _run(cmd)
     if result.returncode != 0:
@@ -167,7 +178,7 @@ def install_pandoc_dependencies(
     # 尝试从 /etc/os-release 获取更精确的发行版信息
     if system in ("linux", "linux2"):
         try:
-            with open("/etc/os-release", "r") as f:
+            with open("/etc/os-release") as f:
                 content = f.read().lower()
             if "ubuntu" in content:
                 distro = "ubuntu"

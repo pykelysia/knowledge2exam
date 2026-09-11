@@ -29,7 +29,7 @@ from app.core.debug_log import log_error, log_step
 from app.core.enums import FILE_SOURCE_TYPES, TEXT_SOURCE_TYPES, SourceType
 from app.core.exceptions import ErrorCode
 from app.core.storage import StorageError, storage
-from app.ingestion.chunking import Chunker
+from app.ingestion.chunking import Chunk, Chunker
 from app.ingestion.embedding import EmbeddingClient
 from app.ingestion.parsers import get_parser
 from app.ingestion.postprocess import build_merged_text, process_images
@@ -212,6 +212,7 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
         "duration_minutes": job.duration_minutes,
         "need_explanation": job.need_explanation,
         "max_retries": settings.agent_max_retries,
+        "user_id": job.user_id,
         "school_id": job.school_id,
         "course_id": job.course_id,
         "upload_ids": await _get_job_upload_ids(db, job.id),
@@ -415,12 +416,12 @@ async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, An
                 if not upload.storage_key:
                     raise StorageError(f"上传件缺少存储对象: id={upload.id}")
                 data = await storage.get(upload.storage_key)
-                result = await parser.parse(upload.filename or "", data)
+                result = await parser.parse_async(upload.filename or "", data)
 
-                # 图片后处理：去重、合并、间隙标记
+                # 图片后处理（OCR 在工作线程内执行）：去重、合并、间隙标记
                 if result.images:
-                    process_images(result.images)
-                    image_text = build_merged_text(result.images)
+                    await asyncio.to_thread(process_images, result.images)
+                    image_text = await asyncio.to_thread(build_merged_text, result.images)
                     if image_text:
                         result.text = result.text + "\n\n" + image_text
                         result.char_count = len(result.text)
@@ -472,16 +473,7 @@ async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, An
             if chunks:
                 # 批量嵌入
                 embeddings = await embedder.embed([c.text for c in chunks])
-                for chunk, _emb in zip(chunks, embeddings, strict=True):
-                    chunk.resource_id = resource.id
-                    chunk.upload_id = upload.id
-                    chunk.user_id = job.user_id
-                    chunk.school_id = job.school_id
-                    chunk.course_id = job.course_id
-                    chunk.source_type = upload.source_type
-                    chunk.is_shared = (
-                        upload.shareable and job.school_id is not None and job.course_id is not None
-                    )
+                _bind_chunk_metadata(chunks, embeddings, resource=resource, upload=upload, job=job)
 
                 await vector_store.upsert(chunks)
 
@@ -527,3 +519,25 @@ def _safe_material_stem(filename: str) -> str:
     stem = Path(filename).stem
     safe = re.sub(r"[^A-Za-z0-9_\-]", "_", stem).strip("_")
     return safe[:60]
+
+
+def _bind_chunk_metadata(
+    chunks: list[Chunk],
+    embeddings: list[list[float]],
+    *,
+    resource: Resource,
+    upload: Upload,
+    job: Job,
+) -> None:
+    """把资源/任务元信息与嵌入向量绑定到 chunk（zip 严格等长，多则抛错）。"""
+    for chunk, embedding in zip(chunks, embeddings, strict=True):
+        chunk.resource_id = resource.id
+        chunk.upload_id = upload.id
+        chunk.user_id = job.user_id
+        chunk.school_id = job.school_id
+        chunk.course_id = job.course_id
+        chunk.source_type = upload.source_type
+        chunk.is_shared = (
+            upload.shareable and job.school_id is not None and job.course_id is not None
+        )
+        chunk.embedding = embedding

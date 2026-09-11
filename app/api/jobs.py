@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response, StreamingResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
@@ -30,7 +30,7 @@ from app.models.question import Question
 from app.models.upload import Upload
 from app.models.user import AppUser
 from app.orchestration.stages import _run_pipeline_with_cancellation
-from app.orchestration.state_machine import JobStatus, Stage, is_terminal
+from app.orchestration.state_machine import TERMINAL_STATUSES, JobStatus, Stage, is_terminal
 from app.schemas.job import (
     Artifacts,
     JobAccepted,
@@ -156,35 +156,47 @@ async def stream_job_events(
     user: AppUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
+    # 鉴权、订阅与补发快照全部在流式开始前完成，随后立即释放数据库连接；
+    # 流式阶段只依赖进程内事件队列，不再长期占用连接池。
     await _get_owned_job(db, job_id, user)
 
     last_event_id = request.headers.get("Last-Event-ID")
     after_seq = int(last_event_id) if last_event_id and last_event_id.isdigit() else 0
 
+    # 先订阅后取快照，事件最多重复不丢失；重复由 replayed_max 去重
     queue = subscribe(job_id)
+    rows = (
+        await db.scalars(
+            select(JobStage)
+            .where(JobStage.job_id == job_id, JobStage.seq > after_seq)
+            .order_by(JobStage.seq)
+        )
+    ).all()
+    replay = [(row.seq, row.event_type, row.payload) for row in rows]
+    replayed_max = replay[-1][0] if replay else after_seq
+
+    # 结束当前事务，把连接归还连接池（快照数据已取到内存，不再触库）
+    await db.rollback()
 
     async def event_generator():
         try:
-            rows = (
-                await db.scalars(
-                    select(JobStage)
-                    .where(JobStage.job_id == job_id, JobStage.seq > after_seq)
-                    .order_by(JobStage.seq)
-                )
-            ).all()
-            for row in rows:
-                yield _sse_frame(row.seq, row.event_type, row.payload)
+            for seq, event_type, payload in replay:
+                yield _sse_frame(seq, event_type, payload)
 
             while True:
                 if await request.is_disconnected():
                     break
                 try:
                     evt = await asyncio.wait_for(queue.get(), timeout=15.0)
-                    if evt.get("__close__"):
-                        break
-                    yield _sse_frame(evt["seq"], evt["event"], evt["data"])
                 except TimeoutError:
                     yield ": keep-alive\n\n"
+                    continue
+                if evt.get("__close__"):
+                    break
+                if evt.get("seq", 0) <= replayed_max:
+                    # 补发快照已包含该事件（订阅与快照之间的窗口），去重
+                    continue
+                yield _sse_frame(evt["seq"], evt["event"], evt["data"])
         finally:
             unsubscribe(job_id, queue)
 
@@ -245,13 +257,21 @@ async def cancel_job(
     user: AppUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
-    job = await _get_owned_job(db, job_id, user)
-    if is_terminal(job.status):
-        raise JobAlreadyFinished()
+    await _get_owned_job(db, job_id, user)
 
-    job.status = JobStatus.cancelled.value
-    job.finished_at = datetime.now(UTC)
+    # 条件更新：仅当仍处于非终态时落 cancelled，避免与 pipeline 的终态提交
+    # 竞态时用过期快照把 completed/partially_completed 覆写成 cancelled
+    result = await db.execute(
+        update(Job)
+        .where(
+            Job.id == job_id,
+            Job.status.not_in([s.value for s in TERMINAL_STATUSES]),
+        )
+        .values(status=JobStatus.cancelled.value, finished_at=datetime.now(UTC))
+    )
     await db.commit()
+    if result.rowcount == 0:
+        raise JobAlreadyFinished()
 
     # 尝试取消正在运行的任务进程
     cancel_task(job_id)

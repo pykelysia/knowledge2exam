@@ -1,23 +1,17 @@
-"""PDF 解析器：使用 PyMuPDF / pymupdf4llm 提取文本和内嵌图片。"""
+"""PDF 解析器：使用 PyMuPDF 提取文本和内嵌图片。"""
 
 from __future__ import annotations
 
-import io
+import pymupdf
 
 from app.ingestion.parsers.base import ImageInfo, Parser, ParseResult
 
 
 class PyMuPDFParser(Parser):
-    """PDF 解析器，使用 pymupdf4llm 提取 Markdown 文本和内嵌图片。"""
+    """PDF 解析器，逐页提取文本（含页码标记）和内嵌图片。"""
 
-    async def parse(self, filename: str, data: bytes) -> ParseResult:
-        try:
-            import pymupdf4llm
-        except ImportError as exc:
-            raise RuntimeError("pymupdf4llm 未安装，请运行 `pip install pymupdf4llm`") from exc
-
-        # pymupdf4llm 接受文件路径或文件流
-        doc = pymupdf4llm.Document(io.BytesIO(data))
+    def parse(self, filename: str, data: bytes) -> ParseResult:
+        doc = pymupdf.open(stream=data, filetype="pdf")
 
         # 逐页提取文本，记录页码
         full_text_parts: list[str] = []
@@ -61,7 +55,7 @@ class PyMuPDFParser(Parser):
         except Exception:
             return result
 
-        for img_index, img_item in enumerate(img_list):
+        for img_item in img_list:
             xref = img_item[0]
             try:
                 base_image = doc.extract_image(xref)

@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import type { JobEvent, JobEventType } from '@/api/types'
 
-const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '/api/v1'
+// 与 api/client.ts 保持一致：空字符串 env 视为未配置，回落到默认前缀。
+// 用 ?? 会把 .env.example 里的空值 `VITE_API_BASE_URL=` 原样保留，
+// 导致 SSE 地址缺少 /api/v1 前缀而永远连不上。
+const BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1'
 
 export type EventHandler = (type: JobEventType, data: JobEvent['data'], seq?: number) => void
 

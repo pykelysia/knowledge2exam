@@ -17,6 +17,7 @@ EXPECTED_CONTEXT_KEYS = {
     "duration_minutes",
     "need_explanation",
     "max_retries",
+    "user_id",
     "school_id",
     "course_id",
     "upload_ids",
@@ -93,6 +94,7 @@ async def test_agent_context_contract(fakes) -> None:
     assert set(context) == EXPECTED_CONTEXT_KEYS
     assert context["duration_minutes"] == 120
     assert context["need_explanation"] is True
+    assert context["user_id"] == job.user_id
     assert fakes["job_id"] == job.id
 
 

@@ -60,3 +60,41 @@ class TestBuildMarkdown:
 
         assert "因为所以" not in md
         assert "解析：" not in md  # 「参考答案与解析」标题除外，不能断言裸词
+
+
+class TestCleanLiteralEscapes:
+    """_clean_literal_escapes 回归：只清理游离转义，不得误伤 LaTeX 命令。"""
+
+    def test_latex_commands_preserved(self) -> None:
+        """\\times / \\neq / \\theta 等真实数学命令不能被改写成双重转义。"""
+        plan = TodoItem(seq=1, question_type="blank", knowledge_point="三角函数")
+        q = make_question(
+            1,
+            question_type="blank",
+            options=None,
+            stem="已知 $a \\times b \\neq 0$ 且 $\\theta \\in (0, \\pi)$，则 ______",
+        )
+
+        md = build_markdown("试卷", [(plan, q)], need_explanation=False)
+
+        assert "\\times" in md
+        assert "\\neq" in md
+        assert "\\theta" in md
+        assert "\\\\times" not in md
+        assert "\\\\neq" not in md
+
+    def test_standalone_literal_escape_still_cleaned(self) -> None:
+        """游离的字面量 \\n / \\t 仍被转义（原修复目标不回退）。"""
+        plan = TodoItem(seq=1, question_type="blank", knowledge_point="格式")
+        q = make_question(
+            1,
+            question_type="blank",
+            options=None,
+            stem="转义示例一：abc\\ndef；转义示例二：x\\ty；行尾：z\\n",
+        )
+
+        md = build_markdown("试卷", [(plan, q)], need_explanation=False)
+
+        assert "abc\\\\ndef" in md
+        assert "x\\\\ty" in md
+        assert "z\\\\n" in md

@@ -10,7 +10,7 @@ from app.ingestion.parsers.base import ImageInfo, Parser, ParseResult
 class DocxParser(Parser):
     """DOCX 解析器，提取段落文本和内嵌图片。"""
 
-    async def parse(self, filename: str, data: bytes) -> ParseResult:
+    def parse(self, filename: str, data: bytes) -> ParseResult:
         try:
             from docx import Document
         except ImportError as exc:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select
@@ -32,6 +33,7 @@ from app.schemas.upload import Upload as UploadSchema
 router = APIRouter(tags=["Uploads"])
 
 _ALLOWED_EXTENSIONS_FOR_MSG = sorted(SUPPORTED_EXTENSIONS)
+_READ_CHUNK_SIZE = 1024 * 1024
 
 
 def _file_source_type(value: str) -> SourceType:
@@ -50,6 +52,25 @@ def _file_source_type(value: str) -> SourceType:
             detail={"allowed": [t.value for t in FILE_SOURCE_TYPES]},
         )
     return st
+
+
+async def _read_capped(file: Any, max_bytes: int) -> bytes:
+    """分块读取上传流，超限立即中断，避免超大请求整体载入内存。"""
+    blocks: list[bytes] = []
+    total = 0
+    while True:
+        block = await file.read(_READ_CHUNK_SIZE)
+        if not block:
+            break
+        total += len(block)
+        if total > max_bytes:
+            raise AppException(
+                ErrorCode.FILE_TOO_LARGE,
+                f"文件超出大小上限（{max_bytes} 字节）",
+                detail={"max_bytes": max_bytes},
+            )
+        blocks.append(block)
+    return b"".join(blocks)
 
 
 async def _parse_and_store_file(
@@ -91,10 +112,11 @@ async def _parse_and_store_file(
     db.add(upload)
     await db.flush()
 
-    # 解析
-    parser = get_parser(filename or "")
+    # 解析：get_parser 对未映射扩展名抛 ValueError，一并隔离为解析失败，
+    # 避免文件已落盘后 500 造成孤儿对象
     try:
-        result = await parser.parse(filename, data)
+        parser = get_parser(filename or "")
+        result = await parser.parse_async(filename, data)
         upload.parse_status = "succeeded"
         preview = Preview(
             char_count=result.char_count,
@@ -181,6 +203,17 @@ async def create_upload(
     content_type = request.headers.get("content-type", "")
 
     if content_type.startswith("multipart/form-data"):
+        # 请求体级预检：超限请求在读入任何内容前直接拒绝
+        content_length = request.headers.get("content-length")
+        if content_length and content_length.isdigit() and int(content_length) > (
+            settings.max_upload_size_bytes
+        ):
+            raise AppException(
+                ErrorCode.FILE_TOO_LARGE,
+                f"请求体超出大小上限（{settings.max_upload_size_bytes} 字节）",
+                detail={"max_bytes": settings.max_upload_size_bytes},
+            )
+
         form = await request.form()
         file = form.get("file")
         if file is None:
@@ -193,7 +226,7 @@ async def create_upload(
 
         source_type = _file_source_type(str(source_type_raw))
         filename = getattr(file, "filename", None) or "upload"
-        data = await file.read()
+        data = await _read_capped(file, settings.max_upload_size_bytes)
 
         return await _parse_and_store_file(
             db, user, source_type, filename, data, shareable

@@ -10,7 +10,7 @@ from app.ingestion.parsers.base import ImageInfo, Parser, ParseResult
 class PPTXParser(Parser):
     """PPTX 解析器，提取每页幻灯片文本和内嵌图片。"""
 
-    async def parse(self, filename: str, data: bytes) -> ParseResult:
+    def parse(self, filename: str, data: bytes) -> ParseResult:
         try:
             from pptx import Presentation
             from pptx.enum.shapes import MSO_SHAPE_TYPE

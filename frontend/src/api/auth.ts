@@ -1,4 +1,4 @@
-import { client } from '@/api/client'
+import { client, refreshSession } from '@/api/client'
 import type {
   LoginRequest,
   RegisterRequest,
@@ -15,8 +15,8 @@ export async function login(payload: LoginRequest): Promise<UserResponse> {
   return data
 }
 
-// Cookie 模式下不再需要主动 refresh——浏览器自动携带 refresh_token cookie
-// 后端在 access_token 过期时自动轮换
+// access token 过期由 client 的响应拦截器调用 refreshSession 自动续期并重放。
+export { refreshSession as refresh }
 
 export async function logout(): Promise<void> {
   await client.post('/auth/logout')
