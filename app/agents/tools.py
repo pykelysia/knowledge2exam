@@ -1,6 +1,7 @@
 """ReAct agent 的工具集。
 
-6 个工具：todo_write / check_todo / read_file / edit_file / search_knowledge / load_skill。
+7 个工具：todo_write / check_todo / read_file / edit_file / search_knowledge /
+load_skill / render_paper。
 全部为工厂函数产物：闭包捕获 AgentContext（依赖 + 运行状态），无全局可变状态。
 
 错误处理约定：工具不向循环抛异常，而是返回可读的错误文本——模型据此自我修正；
@@ -12,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
@@ -29,6 +31,9 @@ from app.agents.schemas import (
 from app.agents.skills import SkillError, SkillLoader
 from app.agents.workspace import Workspace, WorkspaceError
 from app.core.enums import SourceType
+from app.core.storage import Storage
+from app.rendering.markdown import build_markdown
+from app.rendering.renderer import Renderer, get_renderer
 from app.retrieval.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -54,6 +59,7 @@ class AgentContext:
     # 静态依赖
     job_id: UUID
     workspace: Workspace
+    storage: Storage
     skills: SkillLoader
     vector_store: VectorStore
     hooks: AgentHooks
@@ -62,6 +68,10 @@ class AgentContext:
     course_id: UUID | None = None
     need_explanation: bool = False
     max_retries: int = 3
+    duration_minutes: int = 100
+    render_max_retries: int = 3
+    # 惰性工厂：仅在真正渲染时构造 renderer（触发 pandoc 检测）
+    renderer_factory: Callable[[], Renderer] = get_renderer
 
     # 运行状态
     todos: list[TodoItem] = field(default_factory=list)
@@ -69,15 +79,13 @@ class AgentContext:
     retry_counts: dict[int, int] = field(default_factory=dict)
     abandoned_seqs: set[int] = field(default_factory=set)
     accepted_seqs: set[int] = field(default_factory=set)
+    render_attempts: int = 0
+    render_status: str = "not_attempted"  # not_attempted / succeeded / md_only
+    render_error: str | None = None
 
 
-async def finalize(
-    ctx: AgentContext,
-    intent: ExamIntent | None,
-    summary: str = "",
-    completed_normally: bool = False,
-) -> ExamResult:
-    """汇总运行产物：读取工作区中的题目文件，结合蓝图与放弃记录生成 ExamResult。"""
+async def _load_workspace_questions(ctx: AgentContext) -> list[ExamQuestion]:
+    """扫描并解析工作区 questions/ 下的题目文件（命名不合规/解析失败 → 告警跳过）。"""
     questions: list[ExamQuestion] = []
     for name in await ctx.workspace.list_dir("questions"):
         rel = f"questions/{name}"
@@ -94,6 +102,17 @@ async def finalize(
             logger.warning("跳过无法解析的题目文件 %s: %s", rel, exc)
             await ctx.hooks.fire_warning(f"题目文件 {rel} 无法解析，已跳过：{exc}")
     questions.sort(key=lambda q: q.seq)
+    return questions
+
+
+async def finalize(
+    ctx: AgentContext,
+    intent: ExamIntent | None,
+    summary: str = "",
+    completed_normally: bool = False,
+) -> ExamResult:
+    """汇总运行产物：读取工作区中的题目文件，结合蓝图与放弃记录生成 ExamResult。"""
+    questions = await _load_workspace_questions(ctx)
 
     return ExamResult(
         intent=intent,
@@ -102,6 +121,8 @@ async def finalize(
         abandoned_seqs=sorted(ctx.abandoned_seqs),
         summary=summary,
         completed_normally=completed_normally,
+        render_status=ctx.render_status,
+        render_error=ctx.render_error,
     )
 
 
@@ -382,6 +403,102 @@ def _load_skill_tool(ctx: AgentContext) -> StructuredTool:
 
 
 # ---------------------------------------------------------------------------
+# 整卷渲染
+# ---------------------------------------------------------------------------
+
+
+class RenderEnvironmentError(RuntimeError):
+    """渲染环境不可用（pandoc/xelatex 缺失、自动安装失败），无法通过修改内容修复。"""
+
+
+async def _render_paper_once(ctx: AgentContext) -> int:
+    """执行一次完整渲染：读题 → 合成 md → 写 paper.md → 渲染并写 paper.pdf。
+
+    返回纳入试卷的题数；失败抛异常，由调用方分类处理。
+    md 先于 PDF 落盘：PDF 失败降级时 paper.md 仍可交付。
+    """
+    await ctx.hooks.fire_render_start()
+    questions = await _load_workspace_questions(ctx)
+    plan_map = {t.seq: t for t in ctx.todos}
+    orphans = sorted(q.seq for q in questions if q.seq not in plan_map)
+    if orphans:
+        await ctx.hooks.fire_warning(f"题目 {orphans} 无对应蓝图项，未纳入试卷")
+    pairs = [(plan_map[q.seq], q) for q in questions if q.seq in plan_map]
+
+    title = f"试卷（{ctx.duration_minutes} 分钟）"
+    md_bytes = build_markdown(title, pairs, ctx.need_explanation).encode("utf-8")
+    await ctx.storage.put(f"jobs/{ctx.job_id}/output/paper.md", md_bytes)
+
+    try:
+        renderer = ctx.renderer_factory()
+    except Exception as exc:
+        raise RenderEnvironmentError(f"渲染依赖不可用: {exc}") from exc
+    pdf = await renderer.render_markdown(md_bytes, title=title)
+    await ctx.storage.put(f"jobs/{ctx.job_id}/output/paper.pdf", pdf)
+    ctx.render_status = "succeeded"
+    ctx.render_error = None
+    return len(pairs)
+
+
+def _render_paper_tool(ctx: AgentContext) -> StructuredTool:
+    async def render_paper() -> str:
+        if ctx.render_status == "succeeded":
+            return "试卷已渲染成功，无需重复渲染。请直接输出总结并结束。"
+        if ctx.render_status == "md_only":
+            return (
+                "渲染此前已停止（PDF 未生成），试卷 paper.md 仍可交付。"
+                "请直接输出总结并结束，不要再调用 render_paper。"
+            )
+        if not await ctx.workspace.list_dir("questions"):
+            return "工作区没有任何题目文件，无法渲染。请先完成题目后再次调用 render_paper。"
+
+        try:
+            included = await _render_paper_once(ctx)
+        except (RenderEnvironmentError, FileNotFoundError) as exc:
+            # 环境性错误：修改题目无法修复，跳过重试直接降级交付 md
+            ctx.render_status = "md_only"
+            ctx.render_error = str(exc)
+            await ctx.hooks.fire_warning(f"渲染环境异常，跳过重试降级交付 md：{exc}")
+            return (
+                f"渲染环境异常（{exc}），无法通过修改题目修复，已停止重试。"
+                "试卷 paper.md 已生成，请直接输出总结并结束，不要再调用 render_paper。"
+            )
+        except Exception as exc:
+            # 内容性错误（pandoc 非零退出/输出无效/超时）：回传错误让模型修正重试
+            ctx.render_attempts += 1
+            if ctx.render_attempts >= ctx.render_max_retries:
+                ctx.render_status = "md_only"
+                ctx.render_error = str(exc)
+                await ctx.hooks.fire_warning(
+                    f"渲染连续 {ctx.render_attempts} 次失败，放弃 PDF：{exc}"
+                )
+                return (
+                    f"渲染已连续失败 {ctx.render_attempts} 次，已放弃 PDF 渲染"
+                    "（试卷 paper.md 仍已生成）。请直接输出总结并结束，不要再调用 render_paper。"
+                )
+            return (
+                f"试卷渲染失败（第 {ctx.render_attempts}/{ctx.render_max_retries} 次）：{exc}。"
+                "通常是题目中的 LaTeX 特殊字符或公式语法问题。"
+                '请先 load_skill("latex-rendering") 查看规范，'
+                "用 edit_file 修正相关题目后重新调用 render_paper。"
+            )
+        return (
+            f"试卷渲染成功：paper.md 与 paper.pdf 已生成（共 {included} 题）。"
+            "请直接输出总结并结束。"
+        )
+
+    return StructuredTool.from_function(
+        coroutine=render_paper,
+        name="render_paper",
+        description=(
+            "把整份试卷渲染为 PDF 交付产物。所有题目完成后必须调用本工具，"
+            "渲染成功（或工具明确告知已放弃渲染）后才能输出总结结束。"
+            "失败时会返回 pandoc 错误信息，需按提示修正题目后重试。"
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
 # 入口
 # ---------------------------------------------------------------------------
 
@@ -395,4 +512,5 @@ def build_agent_tools(ctx: AgentContext) -> list[StructuredTool]:
         _edit_file_tool(ctx),
         _search_knowledge_tool(ctx),
         _load_skill_tool(ctx),
+        _render_paper_tool(ctx),
     ]

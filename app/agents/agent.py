@@ -1,10 +1,11 @@
-"""ReAct agent 入口：意图提取 → 组装 → 循环 → 汇总。
+"""ReAct agent 入口：意图提取 → 组装 → 循环 → 渲染兜底 → 汇总。
 
 对应架构图：
     用户文本输入 → [意图提取] ─┐
     系统预置提示词 ────────────┤→ [ReAct agent ⇄ tool use] → 决策（结束）
     skill system + 知识库 ─────┘                              ↓
-                                              ExamResult 交回编排层入库渲染
+                              render_paper（整卷渲染，未调用则兜底补渲染）
+                                              ExamResult 交回编排层入库
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from app.agents.llm import get_chat_model
 from app.agents.prompts import load_prompt, render_prompt
 from app.agents.schemas import AgentHooks, AgentSummary, ExamResult
 from app.agents.skills import SkillLoader
-from app.agents.tools import AgentContext, build_agent_tools, finalize
+from app.agents.tools import AgentContext, _render_paper_once, build_agent_tools, finalize
 from app.agents.workspace import Workspace, WorkspaceError
 from app.config import settings
 from app.core.db import AsyncSessionLocal
@@ -49,10 +50,12 @@ async def run_exam_agent(
     """
     hooks = hooks or AgentHooks()
     workspace = Workspace(storage, prefix=f"jobs/{job_id}/agent")
+    duration = int(context.get("duration_minutes", _DEFAULT_DURATION_MINUTES))
 
     ctx = AgentContext(
         job_id=job_id,
         workspace=workspace,
+        storage=storage,
         skills=SkillLoader(settings.skills_dir),
         vector_store=PgVectorStore(AsyncSessionLocal),
         hooks=hooks,
@@ -61,10 +64,13 @@ async def run_exam_agent(
         upload_ids=list(context.get("upload_ids") or []),
         need_explanation=bool(context.get("need_explanation")),
         max_retries=int(context.get("max_retries", settings.agent_max_retries)),
+        duration_minutes=duration,
+        render_max_retries=int(
+            context.get("max_render_retries", settings.agent_max_render_retries)
+        ),
     )
 
     model = get_chat_model()
-    duration = int(context.get("duration_minutes", _DEFAULT_DURATION_MINUTES))
 
     # ---------- 意图提取 ----------
     intent = await extract_intent(
@@ -125,6 +131,17 @@ async def run_exam_agent(
         completed_normally = False
         logger.exception("agent 循环异常中断（job=%s）", job_id)
         await hooks.fire_warning(f"agent 循环中断：{exc}；以已产出内容收尾")
+
+    # 兜底：模型未调用 render_paper 就结束（或循环异常中断）时补渲染一次，保底交付。
+    # 单次不重试——模型已结束，无人修正内容，同输入重试必然同失败。
+    if ctx.render_status == "not_attempted":
+        try:
+            await _render_paper_once(ctx)
+        except Exception as exc:
+            ctx.render_status = "md_only"
+            ctx.render_error = str(exc)
+            logger.warning("兜底渲染失败（job=%s）: %s", job_id, exc)
+            await hooks.fire_warning(f"兜底渲染失败，仅交付 paper.md：{exc}")
 
     return await finalize(
         ctx,

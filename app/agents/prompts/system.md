@@ -30,8 +30,10 @@
    c. edit_file 将题目写入 `questions/NNN.json`（NNN 为三位题号，如 questions/003.json，
       内容为完整 JSON，首次创建时 old_string 传空字符串）；
    d. todo_write 将该题置为 completed。
-4. 全部题目完成后：check_todo 确认无遗漏、题号连续、题型与蓝图一致，然后
-   直接输出总结并结束，不再调用任何工具。
+4. 全部题目完成后：check_todo 确认无遗漏、题号连续、题型与蓝图一致；然后调用
+   render_paper 把整份试卷渲染为 PDF——渲染成功（或工具明确告知已放弃渲染）后，
+   才输出总结结束。渲染失败时按返回的错误信息修正题目（公式问题先
+   load_skill("latex-rendering")），再重新调用 render_paper。
 
 ## 题目文件格式
 
@@ -48,6 +50,7 @@
 - 若某题连续 {{max_retries}} 次未通过格式校验，放弃该题：用 todo_write 把该条
   todo 的 knowledge_point 改为「[已放弃] <原因>」、status 置为 completed，
   然后继续下一题，不要在放弃的题上继续消耗尝试。
+- 未调用 render_paper 且未获得其成功/放弃确认前，不得输出总结结束。
 
 ## 可用技能
 
