@@ -128,6 +128,12 @@ class ExamResult(BaseModel):
     completed_normally: bool = Field(
         default=False, description="agent 是否正常走完循环（False = 中断后部分产出）"
     )
+    render_status: str = Field(
+        default="not_attempted", description="整卷渲染结果：not_attempted/succeeded/md_only"
+    )
+    render_error: str | None = Field(
+        default=None, description="渲染失败原因（含 pandoc stderr 摘要）"
+    )
 
 
 @dataclass
@@ -140,6 +146,7 @@ class AgentHooks:
     on_plan_ready: Callable[[list[TodoItem]], Awaitable[None]] | None = None
     on_question_accepted: Callable[[ExamQuestion, int, int], Awaitable[None]] | None = None
     on_warning: Callable[[str], Awaitable[None]] | None = None
+    on_render_start: Callable[[], Awaitable[None]] | None = None
 
     async def _safe(self, hook: Callable[..., Awaitable[None]] | None, *args: Any) -> None:
         if hook is None:
@@ -157,3 +164,6 @@ class AgentHooks:
 
     async def fire_warning(self, message: str) -> None:
         await self._safe(self.on_warning, message)
+
+    async def fire_render_start(self) -> None:
+        await self._safe(self.on_render_start)
