@@ -60,12 +60,13 @@ class FakeToolModel(BaseChatModel):
 
 
 class Recorder:
-    """记录 AgentHooks 三类事件的容器。"""
+    """记录 AgentHooks 各类事件的容器。"""
 
     def __init__(self) -> None:
         self.plans: list[list[TodoItem]] = []
         self.questions: list[tuple[ExamQuestion, int, int]] = []
         self.warnings: list[str] = []
+        self.render_starts: list[bool] = []
 
     def hooks(self) -> AgentHooks:
         async def on_plan_ready(todos: list[TodoItem]) -> None:
@@ -77,8 +78,12 @@ class Recorder:
         async def on_warning(message: str) -> None:
             self.warnings.append(message)
 
+        async def on_render_start() -> None:
+            self.render_starts.append(True)
+
         return AgentHooks(
             on_plan_ready=on_plan_ready,
             on_question_accepted=on_question_accepted,
             on_warning=on_warning,
+            on_render_start=on_render_start,
         )

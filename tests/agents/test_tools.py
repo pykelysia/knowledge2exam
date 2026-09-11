@@ -1,4 +1,4 @@
-"""tools 模块单元测试：6 个工具工厂的行为验证。"""
+"""tools 模块单元测试：7 个工具工厂的行为验证。"""
 
 from __future__ import annotations
 
@@ -18,7 +18,8 @@ from tests.agents.helpers import Recorder
 
 
 def make_ctx(tmp_path: Path, **overrides: object) -> AgentContext:
-    ws = Workspace(LocalStorage(tmp_path), prefix=f"jobs/{uuid4()}/agent")
+    store = LocalStorage(tmp_path)
+    ws = Workspace(store, prefix=f"jobs/{uuid4()}/agent")
     # 技能目录也放在 tmp_path，测试不依赖仓库真实目录与 cwd
     skills_dir = tmp_path / "skills"
     skill_file = skills_dir / "exam-authoring" / "SKILL.md"
@@ -30,6 +31,7 @@ def make_ctx(tmp_path: Path, **overrides: object) -> AgentContext:
     defaults: dict = {
         "job_id": uuid4(),
         "workspace": ws,
+        "storage": store,
         "skills": SkillLoader(skills_dir),
         "vector_store": StubStore(),
         "hooks": Recorder().hooks(),
@@ -355,3 +357,204 @@ class TestFinalize:
         result = await finalize(ctx, intent=None)
         assert result.questions == []
         assert len(recorder.warnings) == 1
+
+    async def test_carries_render_state(self, tmp_path: Path, recorder: Recorder) -> None:
+        """finalize 把 ctx 的渲染状态透传到 ExamResult。"""
+        ctx = make_ctx(tmp_path, hooks=recorder.hooks())
+        ctx.render_status = "md_only"
+        ctx.render_error = "pandoc 退出码 1"
+        result = await finalize(ctx, intent=None)
+        assert result.render_status == "md_only"
+        assert result.render_error == "pandoc 退出码 1"
+
+
+class FakeRenderer:
+    """可编程渲染器 stub：按脚本依次回放 bytes 结果或抛异常。"""
+
+    def __init__(self, outcomes: list[bytes | Exception]) -> None:
+        self.outcomes = outcomes
+        self.calls = 0
+        self.seen: list[bytes] = []
+
+    async def render_markdown(self, md: bytes, title: str) -> bytes:
+        self.seen.append(md)
+        outcome = self.outcomes[min(self.calls, len(self.outcomes) - 1)]
+        self.calls += 1
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+class TestRenderPaper:
+    def _ctx(
+        self,
+        tmp_path: Path,
+        recorder: Recorder,
+        renderer: FakeRenderer,
+        **overrides: object,
+    ) -> AgentContext:
+        ctx = make_ctx(
+            tmp_path,
+            hooks=recorder.hooks(),
+            duration_minutes=60,
+            render_max_retries=2,
+            renderer_factory=lambda: renderer,
+            **overrides,
+        )
+        ctx.todos = [todo(1, status="completed"), todo(2, status="completed")]
+        return ctx
+
+    async def _write_questions(self, ctx: AgentContext) -> None:
+        await ctx.workspace.write("questions/001.json", question_json(1))
+        await ctx.workspace.write("questions/002.json", question_json(2))
+
+    async def test_success_writes_md_and_pdf(self, tmp_path: Path, recorder: Recorder) -> None:
+        renderer = FakeRenderer([b"%PDF-1.4 fake\n"])
+        ctx = self._ctx(tmp_path, recorder, renderer)
+        await self._write_questions(ctx)
+        tool = build_agent_tools(ctx)[6]
+
+        text = await tool.coroutine()
+
+        assert "渲染成功" in text
+        assert "共 2 题" in text
+        assert ctx.render_status == "succeeded"
+        assert ctx.render_error is None
+        md = await ctx.storage.get(f"jobs/{ctx.job_id}/output/paper.md")
+        pdf = await ctx.storage.get(f"jobs/{ctx.job_id}/output/paper.pdf")
+        assert "题干" in md.decode("utf-8")
+        assert pdf.startswith(b"%PDF")
+        assert recorder.render_starts == [True]
+
+    async def test_failure_then_success(self, tmp_path: Path, recorder: Recorder) -> None:
+        """内容性失败：回传含 stderr 的修正提示，重试成功后正常收尾。"""
+        renderer = FakeRenderer(
+            [
+                RuntimeError("Pandoc 渲染失败，退出码 1: Undefined control sequence"),
+                b"%PDF-1.4 fake\n",
+            ]
+        )
+        ctx = self._ctx(tmp_path, recorder, renderer)
+        await self._write_questions(ctx)
+        tool = build_agent_tools(ctx)[6]
+
+        text1 = await tool.coroutine()
+
+        assert "第 1/2 次" in text1
+        assert "Undefined control sequence" in text1
+        assert "latex-rendering" in text1
+        assert ctx.render_status == "not_attempted"  # 仍在重试环内
+        # 失败时 md 已落盘（降级交付前提），pdf 未写
+        assert await ctx.storage.get(f"jobs/{ctx.job_id}/output/paper.md")
+        assert not ctx.storage.exists(f"jobs/{ctx.job_id}/output/paper.pdf")
+
+        text2 = await tool.coroutine()
+
+        assert "渲染成功" in text2
+        assert ctx.render_status == "succeeded"
+        assert renderer.calls == 2
+
+    async def test_retry_limit_degrades_to_md_only(
+        self, tmp_path: Path, recorder: Recorder
+    ) -> None:
+        renderer = FakeRenderer([RuntimeError("exit 1")])
+        ctx = self._ctx(tmp_path, recorder, renderer)
+        await self._write_questions(ctx)
+        tool = build_agent_tools(ctx)[6]
+
+        text1 = await tool.coroutine()
+        text2 = await tool.coroutine()
+
+        assert "第 1/2 次" in text1
+        assert "已放弃" in text2
+        assert ctx.render_status == "md_only"
+        assert "exit 1" in ctx.render_error
+        assert ctx.storage.exists(f"jobs/{ctx.job_id}/output/paper.md")
+        assert not ctx.storage.exists(f"jobs/{ctx.job_id}/output/paper.pdf")
+        assert len(recorder.warnings) == 1
+
+        # md_only 为终态：再调用不重跑渲染，直接重申放弃
+        text3 = await tool.coroutine()
+        assert "已停止" in text3
+        assert renderer.calls == 2
+
+    async def test_env_error_file_not_found_skips_retry(
+        self, tmp_path: Path, recorder: Recorder
+    ) -> None:
+        """环境性错误（pandoc 缺失）：一次即降级，不进重试环。"""
+        renderer = FakeRenderer([FileNotFoundError("pandoc not found")])
+        ctx = self._ctx(tmp_path, recorder, renderer)
+        await self._write_questions(ctx)
+        tool = build_agent_tools(ctx)[6]
+
+        text = await tool.coroutine()
+
+        assert "渲染环境异常" in text
+        assert ctx.render_status == "md_only"
+        assert renderer.calls == 1
+        assert len(recorder.warnings) == 1
+
+    async def test_env_error_factory_failure_skips_retry(
+        self, tmp_path: Path, recorder: Recorder
+    ) -> None:
+        """renderer 构造失败（apt 安装失败）：转译为环境错误直接降级。"""
+
+        def broken_factory() -> object:
+            raise RuntimeError("apt 安装失败")
+
+        ctx = make_ctx(
+            tmp_path,
+            hooks=recorder.hooks(),
+            duration_minutes=60,
+            render_max_retries=3,
+            renderer_factory=broken_factory,
+        )
+        ctx.todos = [todo(1, status="completed")]
+        await ctx.workspace.write("questions/001.json", question_json(1))
+        tool = build_agent_tools(ctx)[6]
+
+        text = await tool.coroutine()
+
+        assert "渲染环境异常" in text
+        assert "apt 安装失败" in text
+        assert ctx.render_status == "md_only"
+
+    async def test_no_questions_does_not_count(self, tmp_path: Path, recorder: Recorder) -> None:
+        renderer = FakeRenderer([b"%PDF-1.4 fake\n"])
+        ctx = self._ctx(tmp_path, recorder, renderer)
+        tool = build_agent_tools(ctx)[6]
+
+        text = await tool.coroutine()
+
+        assert "没有任何题目文件" in text
+        assert renderer.calls == 0
+        assert ctx.render_status == "not_attempted"
+        assert ctx.render_attempts == 0
+
+    async def test_idempotent_after_success(self, tmp_path: Path, recorder: Recorder) -> None:
+        renderer = FakeRenderer([b"%PDF-1.4 fake\n"])
+        ctx = self._ctx(tmp_path, recorder, renderer)
+        await self._write_questions(ctx)
+        tool = build_agent_tools(ctx)[6]
+        await tool.coroutine()
+
+        text = await tool.coroutine()
+
+        assert "无需重复渲染" in text
+        assert renderer.calls == 1
+
+    async def test_orphan_question_excluded_with_warning(
+        self, tmp_path: Path, recorder: Recorder
+    ) -> None:
+        """无蓝图项的孤儿题不纳入试卷，只告警。"""
+        renderer = FakeRenderer([b"%PDF-1.4 fake\n"])
+        ctx = self._ctx(tmp_path, recorder, renderer)
+        await self._write_questions(ctx)
+        await ctx.workspace.write("questions/003.json", question_json(3))
+        tool = build_agent_tools(ctx)[6]
+
+        text = await tool.coroutine()
+
+        assert "渲染成功" in text
+        assert "共 2 题" in text
+        assert any("无对应蓝图项" in w for w in recorder.warnings)

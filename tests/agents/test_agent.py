@@ -82,6 +82,19 @@ class StubVectorStore:
         raise AssertionError("测试脚本未安排检索调用")
 
 
+class StubRenderOnce:
+    """_render_paper_once 的 stub：计数调用并直接置渲染成功（不触 pandoc）。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def __call__(self, ctx: Any) -> int:
+        self.calls += 1
+        ctx.render_status = "succeeded"
+        ctx.render_error = None
+        return max(len(ctx.todos), 1)
+
+
 @pytest.fixture
 def job_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Workspace:
     """补丁后的运行环境：本地存储 + 临时 skills + stub 依赖。"""
@@ -92,11 +105,17 @@ def job_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Workspace:
     skill_file.parent.mkdir(parents=True)
     skill_file.write_text("题目文件 questions/NNN.json 的规范说明。", encoding="utf-8")
 
+    render_stub = StubRenderOnce()
     monkeypatch.setattr(agent_module, "storage", LocalStorage(tmp_path))
     monkeypatch.setattr(agent_module, "PgVectorStore", lambda session: StubVectorStore())
     monkeypatch.setattr(agent_module, "extract_intent", _fake_extract_intent)
+    # 工具闭包在 tools 模块全局解析 _render_paper_once，agent.py 兜底解析
+    # 自己 import 的名字——两个命名空间都要替换，且绝不触真实渲染
+    monkeypatch.setattr("app.agents.tools._render_paper_once", render_stub)
+    monkeypatch.setattr(agent_module, "_render_paper_once", render_stub)
     monkeypatch.setattr(settings, "skills_dir", skills_dir)
     ws._job_id = job_id  # 供测试取回
+    ws._render_calls = render_stub  # 供测试断言兜底/工具触发次数
     return ws
 
 
@@ -196,13 +215,14 @@ class TestRunExamAgent:
                     ],
                 ),
                 AIMessage(content="", tool_calls=[tool_call("check_todo", {}, "c7")]),
+                AIMessage(content="", tool_calls=[tool_call("render_paper", {}, "c8")]),
                 AIMessage(
                     content="",
                     tool_calls=[
                         tool_call(
                             "AgentSummary",
                             {"total_questions": 2, "abandoned_count": 0, "summary": "两题完成"},
-                            "c8",
+                            "c9",
                         )
                     ],
                 ),
@@ -225,6 +245,10 @@ class TestRunExamAgent:
         assert result.abandoned_seqs == []
         assert result.intent is not None and result.intent.exam_scope == "高等数学期末"
 
+        # 渲染：模型调用了 render_paper 工具，兜底不再触发
+        assert result.render_status == "succeeded"
+        assert ws._render_calls.calls == 1
+
         # 钩子序列
         assert len(recorder.plans) == 1
         assert [c for _q, c, _t in recorder.questions] == [1, 2]
@@ -233,6 +257,7 @@ class TestRunExamAgent:
 
         # 结构化输出工具确实绑定给了模型
         assert "AgentSummary" in fake.bound_tool_names
+        assert "render_paper" in fake.bound_tool_names
 
         # 系统提示词注入了材料清单与技能索引
         system_text = str(fake.seen_messages[0][0].content)
@@ -261,6 +286,76 @@ class TestRunExamAgent:
         assert result.questions == []
         assert len(recorder.warnings) == 1
         assert "LLM 爆炸" in recorder.warnings[0]
+        # 循环异常中断：兜底渲染仍被触发，渲染状态有值
+        assert ws._render_calls.calls == 1
+        assert result.render_status == "succeeded"
+
+    async def test_skips_render_tool_gets_fallback(
+        self, job_env: Workspace, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """模型不调 render_paper 直接总结：agent.py 兜底补渲染一次。"""
+        ws = job_env
+        fake = FakeToolModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        tool_call(
+                            "todo_write",
+                            {
+                                "todos": [
+                                    {
+                                        "seq": 1,
+                                        "question_type": "blank",
+                                        "knowledge_point": "极限",
+                                    },
+                                ]
+                            },
+                            "c1",
+                        )
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        tool_call(
+                            "edit_file",
+                            {
+                                "path": "questions/001.json",
+                                "old_string": "",
+                                "new_string": make_question(
+                                    1,
+                                    question_type="blank",
+                                    options=None,
+                                    stem="1+1=______",
+                                    answer="2",
+                                ),
+                            },
+                            "c2",
+                        )
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        tool_call(
+                            "AgentSummary",
+                            {"total_questions": 1, "abandoned_count": 0, "summary": "ok"},
+                            "c3",
+                        )
+                    ],
+                ),
+            ]
+        )
+        monkeypatch.setattr(agent_module, "get_chat_model", lambda: fake)
+        recorder = Recorder()
+        result = await run_exam_agent(ws._job_id, {}, recorder.hooks())
+
+        assert result.completed_normally is True
+        assert [q.seq for q in result.questions] == [1]
+        # 工具未被模型调用，兜底路径补了一次渲染
+        assert ws._render_calls.calls == 1
+        assert result.render_status == "succeeded"
 
     async def test_materials_optional(
         self, job_env: Workspace, monkeypatch: pytest.MonkeyPatch
@@ -329,6 +424,9 @@ class TestRunExamAgent:
         assert [q.seq for q in result.questions] == [1]
         system_text = str(fake.seen_messages[0][0].content)
         assert "无材料" in system_text
+        # 脚本未调 render_paper：兜底补渲染
+        assert job_env._render_calls.calls == 1
+        assert result.render_status == "succeeded"
 
 
 # ---------------------------------------------------------------------------
