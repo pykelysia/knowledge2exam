@@ -6,24 +6,21 @@ info:
     试卷生成工具后端接口契约。REST + SSE，所有端点前缀 `/api/v1`。请求与响应均为 JSON，
     除上传接口用 `multipart/form-data`。
 
-    字段命名与 [data-model.md](./data-model.md) 的列名保持一致；`source_type` 枚举见
-    [README.md](./README.md#内容类型source_type取值)。
-
-    本文件由 [api.md](./api.md) 描述的需求生成，是前后端共用的机器可读契约。
-    两个工作区（前端 / 后端）均可由此生成客户端 SDK 或服务端骨架。
+    本文件是前后端共用的机器可读契约，与后端 `app/schemas`、前端 `frontend/src/api/types.ts`
+    保持同步。两个工作区（前端 / 后端）均可由此生成客户端 SDK 或服务端骨架。
 servers:
   - url: /api/v1
     description: 相对路径（同源部署，经反向代理去掉前缀）
 security: []
 tags:
   - name: Auth
-    description: 注册、登录、刷新与登出（FR-21~FR-24）
+    description: 注册、登录、刷新与登出
   - name: Uploads
-    description: 上传与手动输入（FR-1, FR-2）
+    description: 上传与手动输入
   - name: Jobs
-    description: 生成任务、进度与产物（FR-9, FR-10, FR-18, FR-19）
+    description: 生成任务、进度与产物
   - name: Catalog
-    description: 学校与课程列表（FR-5）
+    description: 学校与课程列表
 paths:
   /auth/register:
     post:
@@ -94,14 +91,13 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
   /uploads:
-  /uploads:
     post:
       tags: [Uploads]
       operationId: createUpload
       summary: 上传单个文件或提交文本
       description: |
         两种载荷互斥：文件上传用 `multipart/form-data`，文本提交用 `application/json`。
-        `manual_text` 与 `extra_requirement` 不接受 `shareable` 字段，传入即 400（FR-4）。
+        `manual_text` 与 `extra_requirement` 不接受 `shareable` 字段，传入即 400。
       requestBody:
         required: true
         content:
@@ -153,7 +149,7 @@ paths:
       tags: [Jobs]
       operationId: createJob
       summary: 创建生成任务
-      description: 立即返回 `job_id`（202），生成异步进行（FR-9）。
+      description: 立即返回 `job_id`（202），生成异步进行。
       requestBody:
         required: true
         content:
@@ -174,7 +170,7 @@ paths:
       tags: [Jobs]
       operationId: getJob
       summary: 任务快照（轮询降级用）
-      description: 与 SSE 状态一致（FR-10）。`last_event_seq` 可用于 SSE 重连续传。
+      description: 与 SSE 状态一致。`last_event_seq` 可用于 SSE 重连续传。
       parameters:
         - $ref: '#/components/parameters/JobId'
       responses:
@@ -190,7 +186,7 @@ paths:
       tags: [Jobs]
       operationId: deleteJob
       summary: 删除任务及产物
-      description: 级联规则见 [data-model.md](./data-model.md#7-数据删除)——已共享资源不随之删除。
+      description: 删除任务及其阶段记录与存储产物；已共享资源不随之删除。
       parameters:
         - $ref: '#/components/parameters/JobId'
       responses:
@@ -205,8 +201,20 @@ paths:
       summary: SSE 进度流
       description: |
         `Content-Type: text/event-stream`。每帧含 `id`（对应 `job_stage.seq`）、`event`、`data`。
-        客户端断连后用 `Last-Event-ID` 头重连，服务端从该 `seq` 之后补发（FR-10）。
-        事件类型与 `data` 结构见 [api.md](./api.md#6-sse-事件)。
+        客户端断连后用 `Last-Event-ID` 头重连，服务端从该 `seq` 之后补发。
+
+        事件类型与 `data` 结构（由 `app/orchestration/stages.py` 发出）：
+
+        - `stage_changed`：`{stage, previous}` —— 阶段切换（preprocessing / generating / rendering）
+        - `plan_ready`：`{total, distribution, reference_used, duration_minutes}` ——
+          agent 出题蓝图就绪；`distribution` 按题型（choice / blank / short_answer）计数，
+          `reference_used` 当前恒为 `agent_planning`
+        - `question_completed`：`{seq, question_type, completed, total}` —— 单题通过校验并落盘
+        - `warning`：`{code, upload_id?, message}` —— 非致命告警；
+          `code` ∈ PARSE_FAILED / AGENT_WARNING / RENDER_FAILED
+        - `error`：`{error_code, message}` —— 管线意外异常，任务定格 failed
+        - `done`：`{status, total?, abandoned?, md_url?, pdf_url?}` —— 终态关闭事件；
+          `status` ∈ completed / partially_completed / failed / cancelled（取消时仅含 status）
       parameters:
         - $ref: '#/components/parameters/JobId'
         - name: Last-Event-ID
@@ -471,10 +479,6 @@ components:
       type: string
       description: 文件类内容类型
       enum: [book, lecture, note, keypoint_list, past_paper]
-    SourceTypeFile:
-      type: string
-      description: 文件类内容类型
-      enum: [book, lecture, note, keypoint_list, past_paper]
     SourceType:
       type: string
       description: 全部内容类型（含手动输入）
@@ -526,7 +530,7 @@ components:
         parse_status:
           type: string
           enum: [succeeded, failed]
-          description: 解析失败仍返回 201 并置 failed 与 parse_error（NFR-5）
+          description: 解析失败仍返回 201 并置 failed 与 parse_error
         parse_error:
           type: string
           nullable: true
@@ -542,7 +546,7 @@ components:
             type: string
             format: uuid
           default: []
-          description: 本次使用的上传件；为空且无任何文本类上传件时返回 400 INPUT_EMPTY（FR-3）
+          description: 本次使用的上传件；为空且无任何文本类上传件时返回 400 INPUT_EMPTY
         school_id:
           type: string
           format: uuid
@@ -558,15 +562,11 @@ components:
           minimum: 5
           maximum: 300
           default: 100
-          description: 考试时长（FR-7）
+          description: 考试时长
         need_explanation:
           type: boolean
           default: false
-          description: 是否生成解析（FR-6）
-        enable_review:
-          type: boolean
-          default: false
-          description: 是否启用审查（FR-8）
+          description: 是否生成解析
     JobAccepted:
       type: object
       required: [job_id, status, created_at]
@@ -614,7 +614,7 @@ components:
       properties:
         code:
           type: string
-          enum: [PARSE_FAILED, MODERATION_REJECTED]
+          enum: [PARSE_FAILED, AGENT_WARNING, RENDER_FAILED]
         upload_id:
           type: string
           format: uuid
@@ -648,8 +648,6 @@ components:
           type: integer
         need_explanation:
           type: boolean
-        enable_review:
-          type: boolean
         plan:
           $ref: '#/components/schemas/Plan'
         progress:
@@ -675,11 +673,14 @@ components:
           nullable: true
     JobStatus:
       type: string
-      enum: [pending, preprocessing, planning, generating, reviewing, rendering, completed, partially_completed, failed, cancelled]
-      description: 见 architecture.md 任务状态机
+      enum: [pending, preprocessing, generating, rendering, completed, partially_completed, failed, cancelled]
+      description: |
+        任务状态机（见 app/orchestration/state_machine.py）：pending → preprocessing →
+        generating → rendering → completed；rendering 亦可转入 partially_completed（PDF 渲染
+        失败，仅交付 Markdown）；任一运行态可转入 failed / cancelled。
     Stage:
       type: string
-      enum: [preprocessing, planning, generating, reviewing, rendering]
+      enum: [preprocessing, generating, rendering]
     Question:
       type: object
       description: 一道题目。`need_explanation=false` 时 `explanation` 不出现；简答题子问题与子答案按索引严格对应。
@@ -781,8 +782,8 @@ components:
     ErrorCode:
       type: string
       description: |
-        错误码全集（含仅作为 warning/error 事件出现、无 HTTP 状态的码）。
-        HTTP 状态与前端建议动作见 api.md 第 10 节。
+        错误码全集（与 app/core/exceptions.py 的 ErrorCode 一致）。含仅作为 warning / error
+        事件出现、无 HTTP 状态的码（如 PARSE_FAILED、AGENT_WARNING、PIPELINE_FAILED）。
       enum:
         - INPUT_EMPTY
         - UNSUPPORTED_FORMAT
@@ -800,6 +801,8 @@ components:
         - PLANNING_FAILED
         - GENERATION_EXHAUSTED
         - RENDER_FAILED
+        - AGENT_WARNING
+        - PIPELINE_FAILED
         - MODEL_UNAVAILABLE
         - RATE_LIMITED
         - USER_EXISTS
