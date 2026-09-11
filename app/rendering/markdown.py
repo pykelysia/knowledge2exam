@@ -9,17 +9,22 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
 
 def _plan_comment(plan_item: Any) -> str:
+    # reference_source 仅 DB PlanItem 有（dict | None），TodoItem 等无此字段
+    ref = getattr(plan_item, "reference_source", None)
+    if isinstance(ref, dict):
+        ref = json.dumps(ref, ensure_ascii=False)
     return (
         f"<!-- plan_item: seq={plan_item.seq} "
         f'knowledge_point="{plan_item.knowledge_point}" '
         f'exam_direction="{plan_item.exam_direction}" '
         f'difficulty="{plan_item.difficulty}" '
-        f'reference_source="{plan_item.reference_source or "none"}" -->'
+        f'reference_source="{ref or "none"}" -->'
     )
 
 
