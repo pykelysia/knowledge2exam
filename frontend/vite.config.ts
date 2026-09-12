@@ -11,7 +11,9 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   // 后端 API 基础地址。默认走 Vite 开发代理（见下方 server.proxy），
   // 通过 /api/v1 前缀转发到后端服务，规避跨域与双 JWT 的 Cookie 限制。
-  const apiBase = env.VITE_API_BASE_URL ?? 'http://localhost:8000'
+  // 注意用 || 而非 ??：.env 里的空值 `VITE_API_BASE_URL=` 是空字符串，
+  // ?? 不会回落，空 target 会被 Vite 按 http://base.invalid 解析（DNS 失败）。
+  const apiBase = env.VITE_API_BASE_URL || 'http://localhost:8000'
 
   return {
     plugins: [react(), tailwindcss()],
