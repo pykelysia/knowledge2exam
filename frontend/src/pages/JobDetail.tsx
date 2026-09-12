@@ -8,6 +8,7 @@ import { JOB_STATUS_META, errorMessage } from '@/lib/constants'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { MarkdownContent } from '@/components/MarkdownContent'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { Job, JobEventData, JobEventType, Question } from '@/api/types'
 
@@ -32,6 +33,8 @@ export function JobDetail() {
   const [questions, setQuestions] = useState<Question[]>([])
   const [error, setError] = useState<string | null>(null)
   const [logs, setLogs] = useState<string[]>([])
+  // 出题进度的单条日志：每完成一题原地更新，不追加（追加会在长任务里刷屏）
+  const [progressLine, setProgressLine] = useState<string | null>(null)
   // 任务删除（404）或进入终态后停止轮询
   const [pollingStopped, setPollingStopped] = useState(false)
   const inFlightRef = useRef(false)
@@ -85,7 +88,13 @@ export function JobDetail() {
         }
         case 'question_completed': {
           const d = data as Extract<JobEventData, { completed: number; total: number }>
-          setLogs((prev) => [...prev, `完成第 ${d.seq} 题（${d.completed}/${d.total}）`])
+          // 进度条同样从事件流实时更新（SSE 打开期间轮询已停止，快照要等 done 才刷新）
+          setJob((prev) =>
+            prev
+              ? { ...prev, progress: { ...prev.progress, completed: d.completed, total: d.total } }
+              : prev,
+          )
+          setProgressLine(`完成第 ${d.seq} 题（${d.completed}/${d.total}）`)
           break
         }
         case 'warning': {
@@ -269,14 +278,19 @@ export function JobDetail() {
           <CardTitle>进度日志</CardTitle>
         </CardHeader>
         <CardContent>
-          {logs.length === 0 ? (
+          {progressLine === null && logs.length === 0 ? (
             <p className="text-sm text-slate-400">暂无事件，等待任务开始…</p>
           ) : (
-            <ul className="max-h-80 space-y-1 overflow-y-auto text-sm text-slate-600">
-              {logs.map((l, i) => (
-                <li key={i}>{l}</li>
-              ))}
-            </ul>
+            <div className="max-h-80 space-y-1 overflow-y-auto text-sm text-slate-600">
+              {progressLine && (
+                <p className="font-medium text-slate-800">{progressLine}</p>
+              )}
+              <ul className="space-y-1">
+                {logs.map((l, i) => (
+                  <li key={i}>{l}</li>
+                ))}
+              </ul>
+            </div>
           )}
         </CardContent>
       </Card>
@@ -321,38 +335,48 @@ export function JobDetail() {
                           : '简答题'}
                     </Badge>
                   </div>
-                  <p className="text-sm text-slate-800">{q.stem}</p>
+                  <MarkdownContent content={q.stem} className="text-sm text-slate-800" />
                   {q.options && (
                     <ul className="mt-2 space-y-1 text-sm text-slate-600">
                       {Object.entries(q.options).map(([k, v]) => (
-                        <li key={k}>
-                          {k}. {v}
+                        <li key={k} className="flex gap-1.5">
+                          <span className="font-medium text-slate-700">{k}.</span>
+                          <MarkdownContent content={v} className="min-w-0 flex-1" />
                         </li>
                       ))}
                     </ul>
                   )}
                   {q.answer && (
-                    <div className="mt-2 rounded-md bg-slate-50 p-2 text-sm text-slate-700">
+                    <div className="mt-2 flex gap-1.5 rounded-md bg-slate-50 p-2 text-sm text-slate-700">
                       <span className="font-medium">答案：</span>
-                      {q.answer}
+                      <MarkdownContent content={q.answer} className="min-w-0 flex-1" />
                     </div>
                   )}
                   {q.explanation && (
-                    <p className="mt-2 text-sm text-slate-500">解析：{q.explanation}</p>
+                    <div className="mt-2 flex gap-1.5 text-sm text-slate-500">
+                      <span className="font-medium">解析：</span>
+                      <MarkdownContent content={q.explanation} className="min-w-0 flex-1" />
+                    </div>
                   )}
                   {q.sub_questions && q.sub_questions.length > 0 && (
-                    <div className="mt-2 space-y-1">
-                      {q.sub_questions.map((sq, i) => (
-                        <div key={i} className="text-sm text-slate-600">
-                          <span className="font-medium">小题 {i + 1}：</span>
-                          {sq}
-                          {q.sub_answers?.[i] && (
-                            <span className="ml-2 text-slate-500">
-                              答案：{q.sub_answers[i]}
-                            </span>
-                          )}
-                        </div>
-                      ))}
+                    <div className="mt-2 space-y-2">
+                      {q.sub_questions.map((sq, i) => {
+                        const subAnswer = q.sub_answers?.[i]
+                        return (
+                          <div key={i}>
+                            <div className="flex gap-1.5 text-sm text-slate-600">
+                              <span className="font-medium">小题 {i + 1}：</span>
+                              <MarkdownContent content={sq} className="min-w-0 flex-1" />
+                            </div>
+                            {subAnswer && (
+                              <div className="mt-1 flex gap-1.5 text-sm text-slate-500">
+                                <span className="font-medium">答案：</span>
+                                <MarkdownContent content={subAnswer} className="min-w-0 flex-1" />
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })}
                     </div>
                   )}
                 </div>
