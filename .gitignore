@@ -20,3 +20,4 @@ test_datas/
 logs/
 scripts/
 test_scripts/
+.zcode/
