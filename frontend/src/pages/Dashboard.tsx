@@ -13,7 +13,7 @@ import { createJob } from '@/api/jobs'
 import { listCourses, listSchools } from '@/api/schools'
 import { extractApiError } from '@/api/client'
 import { FILE_SOURCE_TYPES, SOURCE_TYPE_META, errorMessage, isAllowedExtension } from '@/lib/constants'
-import type { Course, School, SourceType, SourceTypeFile, SourceTypeText, Upload } from '@/api/types'
+import type { Course, School, SourceType, SourceTypeFile, SourceTypeText } from '@/api/types'
 
 /** 前端维护的输入项：一个文件（含其 source_type 与共享意愿）或一段文本。 */
 interface InputItem {
@@ -27,10 +27,6 @@ interface InputItem {
   uploadId?: string
   uploading?: boolean
   error?: string
-  // 上传返回的解析预览与状态。
-  parseStatus?: Upload['parse_status']
-  parseError?: string | null
-  preview?: Upload['preview']
 }
 
 let seq = 0
@@ -158,26 +154,14 @@ export function Dashboard() {
           if (item.kind === 'file' && item.file) {
             const res = await uploadFile(item.file, item.sourceType as SourceTypeFile, item.shareable)
             uploadId = res.upload_id
-            updateItem(item.id, {
-              uploading: false,
-              uploadId,
-              parseStatus: res.parse_status,
-              parseError: res.parse_error,
-              preview: res.preview,
-            })
+            updateItem(item.id, { uploading: false, uploadId })
           } else if (item.kind === 'text' && item.rawText) {
             const res = await uploadText({
               source_type: item.sourceType as SourceTypeText,
               raw_text: item.rawText,
             })
             uploadId = res.upload_id
-            updateItem(item.id, {
-              uploading: false,
-              uploadId,
-              parseStatus: res.parse_status,
-              parseError: res.parse_error,
-              preview: res.preview,
-            })
+            updateItem(item.id, { uploading: false, uploadId })
           } else {
             continue
           }
@@ -245,41 +229,6 @@ export function Dashboard() {
     [],
   )
 
-  function renderPreview(item: InputItem) {
-    if (!item.uploadId) return null
-    const status = item.parseStatus
-    if (status === 'failed') {
-      return (
-        <div className="mt-1 text-xs text-red-600">
-          {item.parseError || '解析失败'}
-        </div>
-      )
-    }
-    if (status === 'succeeded' && item.preview) {
-      return (
-        <div className="mt-1 space-y-1">
-          {item.preview.excerpt && (
-            <p className="text-xs text-slate-500 line-clamp-2">
-              {item.preview.excerpt}
-            </p>
-          )}
-          <div className="flex gap-3 text-xs text-slate-400">
-            {typeof item.preview.char_count === 'number' && (
-              <span>{item.preview.char_count} 字</span>
-            )}
-            {typeof item.preview.page_count === 'number' && (
-              <span>{item.preview.page_count} 页</span>
-            )}
-          </div>
-        </div>
-      )
-    }
-    if (item.uploading) {
-      return <div className="mt-1 text-xs text-slate-400">正在解析…</div>
-    }
-    return null
-  }
-
   return (
     <div className="space-y-6">
       <div>
@@ -338,6 +287,9 @@ export function Dashboard() {
                           共享
                         </label>
                         {it.uploading && <Spinner className="h-4 w-4" />}
+                        {!it.uploading && it.uploadId && !it.error && (
+                          <span className="text-xs text-emerald-600">已上传</span>
+                        )}
                         {it.error && <span className="text-xs text-red-600">{it.error}</span>}
                         <button
                           type="button"
@@ -348,7 +300,6 @@ export function Dashboard() {
                           <Trash2 className="h-4 w-4" />
                         </button>
                       </div>
-                      {renderPreview(it)}
                     </li>
                   ))}
               </ul>

@@ -41,23 +41,12 @@ export interface LoginRequest {
 
 // ---- 上传 ----
 
-export interface Preview {
-  char_count?: number
-  page_count?: number | null
-  excerpt?: string
-}
-
-export type ParseStatus = 'succeeded' | 'failed'
-
 export interface Upload {
   upload_id: string
   source_type: SourceType
   filename?: string | null
   size_bytes?: number | null
   shareable?: boolean
-  parse_status: ParseStatus
-  parse_error?: string | null
-  preview?: Preview
 }
 
 export interface TextUploadCreate {
