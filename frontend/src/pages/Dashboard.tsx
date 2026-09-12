@@ -1,11 +1,22 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { FileText, Plus, Trash2, Upload as UploadIcon } from 'lucide-react'
+import {
+  AlertCircle,
+  Check,
+  FileText,
+  PenLine,
+  Plus,
+  School as SchoolIcon,
+  SlidersHorizontal,
+  Trash2,
+  Upload as UploadIcon,
+} from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Select } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardContent, CardHeader, CardIcon, CardTitle } from '@/components/ui/card'
 import { Spinner } from '@/components/ui/spinner'
 import { Skeleton } from '@/components/ui/skeleton'
 import { uploadFile, uploadText, deleteUpload } from '@/api/uploads'
@@ -43,6 +54,7 @@ export function Dashboard() {
   const [extraRequirement, setExtraRequirement] = useState('')
   const [duration, setDuration] = useState(100)
   const [needExplanation, setNeedExplanation] = useState(true)
+  const [dragging, setDragging] = useState(false)
 
   // 学校 / 课程（FR-5）
   const [schools, setSchools] = useState<School[]>([])
@@ -117,6 +129,14 @@ export function Dashboard() {
 
   const hasAnyInput = useMemo(
     () => items.some((it) => !it.error) || manualText.trim() !== '' || extraRequirement.trim() !== '',
+    [items, manualText, extraRequirement],
+  )
+
+  const readyCount = useMemo(
+    () =>
+      items.filter((it) => !it.error).length +
+      (manualText.trim() !== '' ? 1 : 0) +
+      (extraRequirement.trim() !== '' ? 1 : 0),
     [items, manualText, extraRequirement],
   )
 
@@ -214,17 +234,17 @@ export function Dashboard() {
 
   const renderSourceTypeSelect = useCallback(
     (item: InputItem) => (
-      <select
+      <Select
         value={item.sourceType}
         onChange={(e) => updateItem(item.id, { sourceType: e.target.value as SourceType })}
-        className="w-40 rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm"
+        className="w-40 flex-none px-2.5 py-1.5 text-[12.5px]"
       >
         {FILE_SOURCE_TYPES.map((t) => (
           <option key={t} value={t}>
             {SOURCE_TYPE_META[t].label}
           </option>
         ))}
-      </select>
+      </Select>
     ),
     [],
   )
@@ -232,8 +252,8 @@ export function Dashboard() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold text-slate-900">生成试卷</h1>
-        <p className="mt-1 text-sm text-slate-600">
+        <h1 className="text-2xl font-semibold tracking-[-0.02em] text-slate-900">生成试卷</h1>
+        <p className="mt-1.5 text-[13.5px] text-slate-500">
           上传课程资料或输入文本，系统据此生成一份模拟试卷。
         </p>
       </div>
@@ -242,20 +262,47 @@ export function Dashboard() {
         {/* 上传文件 */}
         <Card>
           <CardHeader>
+            <CardIcon>
+              <UploadIcon />
+            </CardIcon>
             <CardTitle>上传资料</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            <label className="flex cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed border-slate-300 bg-slate-50 px-4 py-8 text-center hover:bg-slate-100">
-              <UploadIcon className="mb-2 h-6 w-6 text-slate-400" />
-              <span className="text-sm text-slate-600">点击选择文件，可多选</span>
-              <span className="mt-1 text-xs text-slate-400">
-                支持 docx / doc / pptx / ppt / pdf / md / txt / jpg / jpeg / png / webp / bmp
+            <label
+              className={`group flex cursor-pointer flex-col items-center justify-center rounded-xl border-[1.5px] border-dashed px-4 py-[30px] text-center transition-[border-color,background-color,box-shadow] ${
+                dragging
+                  ? 'border-slate-900 bg-slate-100 ring-4 ring-slate-900/[0.06]'
+                  : 'border-slate-300 bg-slate-50/60 hover:border-slate-400 hover:bg-slate-50'
+              }`}
+              onDragOver={(e) => {
+                e.preventDefault()
+                setDragging(true)
+              }}
+              onDragLeave={() => setDragging(false)}
+              onDrop={(e) => {
+                e.preventDefault()
+                setDragging(false)
+                if (e.dataTransfer.files.length > 0) addFiles(e.dataTransfer.files)
+              }}
+            >
+              <span
+                className={`mb-3 grid h-[46px] w-[46px] place-items-center rounded-full border bg-white shadow-card transition-colors group-hover:border-slate-900 group-hover:bg-slate-900 group-hover:text-white ${
+                  dragging ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 text-slate-500'
+                }`}
+              >
+                <UploadIcon className="h-5 w-5" />
+              </span>
+              <span className="text-[13.5px] text-slate-700">
+                <b className="font-semibold text-slate-900">点击选择文件</b>，或将文件拖拽到此处
+              </span>
+              <span className="mt-1.5 text-xs leading-relaxed text-slate-400">
+                支持 docx / pptx / pdf / md / txt / jpg / jpeg / png / webp / bmp，可多选
               </span>
               <input
                 type="file"
                 multiple
                 className="hidden"
-                accept=".docx,.doc,.pptx,.ppt,.pdf,.md,.txt,.jpg,.jpeg,.png,.webp,.bmp"
+                accept=".docx,.pptx,.pdf,.md,.txt,.jpg,.jpeg,.png,.webp,.bmp"
                 onChange={(e) => {
                   if (e.target.files) addFiles(e.target.files)
                   e.target.value = ''
@@ -270,36 +317,40 @@ export function Dashboard() {
                   .map((it) => (
                     <li
                       key={it.id}
-                      className="flex flex-col rounded-md border border-slate-200 px-3 py-2"
+                      className="flex items-center gap-3 rounded-[10px] border border-slate-200 bg-white px-3 py-2 transition-[border-color,box-shadow] hover:border-slate-300 hover:shadow-card max-[720px]:flex-wrap max-[720px]:row-gap-2"
                     >
-                      <div className="flex items-center gap-3">
-                        <FileText className="h-4 w-4 shrink-0 text-slate-400" />
-                        <span className="min-w-0 flex-1 truncate text-sm text-slate-700">
-                          {it.file?.name}
+                      <span className="grid h-[30px] w-[30px] flex-none place-items-center rounded-lg bg-slate-100 text-slate-600">
+                        <FileText className="h-[15px] w-[15px]" />
+                      </span>
+                      <span className="min-w-0 flex-1 truncate text-[13px] text-slate-700">
+                        {it.file?.name}
+                      </span>
+                      {renderSourceTypeSelect(it)}
+                      <label className="flex flex-none items-center gap-1.5 text-xs text-slate-600">
+                        <input
+                          type="checkbox"
+                          className="h-[15px] w-[15px] accent-slate-900"
+                          checked={it.shareable}
+                          onChange={(e) => updateItem(it.id, { shareable: e.target.checked })}
+                        />
+                        共享
+                      </label>
+                      {it.uploading && <Spinner className="h-4 w-4 flex-none" />}
+                      {!it.uploading && it.uploadId && !it.error && (
+                        <span className="flex flex-none items-center gap-1 text-xs text-emerald-600">
+                          <Check className="h-3.5 w-3.5" />
+                          已上传
                         </span>
-                        {renderSourceTypeSelect(it)}
-                        <label className="flex items-center gap-1 text-xs text-slate-600">
-                          <input
-                            type="checkbox"
-                            checked={it.shareable}
-                            onChange={(e) => updateItem(it.id, { shareable: e.target.checked })}
-                          />
-                          共享
-                        </label>
-                        {it.uploading && <Spinner className="h-4 w-4" />}
-                        {!it.uploading && it.uploadId && !it.error && (
-                          <span className="text-xs text-emerald-600">已上传</span>
-                        )}
-                        {it.error && <span className="text-xs text-red-600">{it.error}</span>}
-                        <button
-                          type="button"
-                          onClick={() => removeItem(it.id)}
-                          className="text-slate-400 hover:text-red-600"
-                          aria-label="移除"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </button>
-                      </div>
+                      )}
+                      {it.error && <span className="flex-none text-xs text-red-600">{it.error}</span>}
+                      <button
+                        type="button"
+                        onClick={() => removeItem(it.id)}
+                        className="grid h-7 w-7 flex-none place-items-center rounded-[7px] text-slate-400 transition-colors hover:bg-red-50 hover:text-red-600"
+                        aria-label="移除"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
                     </li>
                   ))}
               </ul>
@@ -310,11 +361,16 @@ export function Dashboard() {
         {/* 手动输入 */}
         <Card>
           <CardHeader>
+            <CardIcon>
+              <PenLine />
+            </CardIcon>
             <CardTitle>手动输入</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
             <div>
-              <Label htmlFor="manual-text">学习笔记 / 重点内容（manual_text）</Label>
+              <Label htmlFor="manual-text">
+                学习笔记 / 重点内容 <span className="font-normal text-slate-400">（manual_text）</span>
+              </Label>
               <Textarea
                 id="manual-text"
                 rows={4}
@@ -324,7 +380,9 @@ export function Dashboard() {
               />
             </div>
             <div>
-              <Label htmlFor="extra-requirement">额外要求（extra_requirement）</Label>
+              <Label htmlFor="extra-requirement">
+                额外要求 <span className="font-normal text-slate-400">（extra_requirement）</span>
+              </Label>
               <Textarea
                 id="extra-requirement"
                 rows={2}
@@ -340,19 +398,21 @@ export function Dashboard() {
         {anyShareable && (
           <Card>
             <CardHeader>
+            <CardIcon>
+              <SchoolIcon />
+            </CardIcon>
               <CardTitle>共享归属</CardTitle>
             </CardHeader>
             <CardContent className="grid grid-cols-2 gap-4">
               <div>
                 <Label htmlFor="school">学校</Label>
-                <select
+                <Select
                   id="school"
                   value={schoolId}
                   onChange={(e) => {
                     setSchoolId(e.target.value)
                     setCourseId('')
                   }}
-                  className="w-full rounded-md border border-slate-300 bg-white px-2 py-2 text-sm"
                 >
                   <option value="">请选择学校</option>
                   {schools.map((s) => (
@@ -360,17 +420,16 @@ export function Dashboard() {
                       {s.name}
                     </option>
                   ))}
-                </select>
+                </Select>
                 {loadingSchools && <Skeleton className="mt-1 h-4 w-full" />}
               </div>
               <div>
                 <Label htmlFor="course">课程</Label>
-                <select
+                <Select
                   id="course"
                   value={courseId}
                   onChange={(e) => setCourseId(e.target.value)}
                   disabled={!schoolId || loadingCourses}
-                  className="w-full rounded-md border border-slate-300 bg-white px-2 py-2 text-sm disabled:opacity-50"
                 >
                   <option value="">请选择课程</option>
                   {courses.map((c) => (
@@ -381,7 +440,7 @@ export function Dashboard() {
                         : ''}
                     </option>
                   ))}
-                </select>
+                </Select>
                 {loadingCourses && <Skeleton className="mt-1 h-4 w-full" />}
               </div>
             </CardContent>
@@ -391,6 +450,9 @@ export function Dashboard() {
         {/* 生成选项 */}
         <Card>
           <CardHeader>
+            <CardIcon>
+              <SlidersHorizontal />
+            </CardIcon>
             <CardTitle>生成选项</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -404,11 +466,13 @@ export function Dashboard() {
                   max={300}
                   value={duration}
                   onChange={(e) => setDuration(Number(e.target.value))}
+                  className="max-w-[200px] tabular-nums"
                 />
               </div>
-              <label className="flex items-center gap-2 pt-6 text-sm text-slate-700">
+              <label className="flex items-end gap-2 pb-[9px] text-[13px] text-slate-700">
                 <input
                   type="checkbox"
+                  className="h-[15px] w-[15px] accent-slate-900"
                   checked={needExplanation}
                   onChange={(e) => setNeedExplanation(e.target.checked)}
                 />
@@ -419,12 +483,13 @@ export function Dashboard() {
         </Card>
 
         {error && (
-          <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-            {error}
+          <div className="flex items-start gap-2.5 rounded-[10px] border border-red-200 bg-red-50 px-3.5 py-2.5 text-[13px] leading-relaxed text-red-700">
+            <AlertCircle className="mt-0.5 h-4 w-4 flex-none text-red-500" />
+            <span>{error}</span>
           </div>
         )}
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3.5">
           <Button type="submit" disabled={submitting || !hasAnyInput}>
             {submitting ? (
               <>
@@ -436,8 +501,13 @@ export function Dashboard() {
               </>
             )}
           </Button>
-          {items.length === 0 && !manualText && !extraRequirement && (
-            <span className="text-sm text-slate-400">至少提供一项输入（文件或文本）</span>
+          {hasAnyInput ? (
+            <span className="inline-flex items-center gap-1.5 text-[12.5px] text-slate-500">
+              <Check className="h-3.5 w-3.5 text-emerald-600" />
+              已就绪 {readyCount} 项输入，可提交生成
+            </span>
+          ) : (
+            <span className="text-[12.5px] text-slate-400">至少提供一项输入（文件或文本）</span>
           )}
         </div>
       </form>
