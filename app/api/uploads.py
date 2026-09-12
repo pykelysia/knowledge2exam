@@ -21,13 +21,12 @@ from app.core.exceptions import (
     UploadNotFound,
 )
 from app.core.storage import storage
-from app.ingestion.parsers import get_parser
 from app.ingestion.parsers.base import SUPPORTED_EXTENSIONS
 from app.models.job import JobUpload
 from app.models.resource import Resource
 from app.models.upload import Upload
 from app.models.user import AppUser
-from app.schemas.upload import Preview, TextUploadCreate
+from app.schemas.upload import TextUploadCreate
 from app.schemas.upload import Upload as UploadSchema
 
 router = APIRouter(tags=["Uploads"])
@@ -73,7 +72,7 @@ async def _read_capped(file: Any, max_bytes: int) -> bytes:
     return b"".join(blocks)
 
 
-async def _parse_and_store_file(
+async def _store_file(
     db: AsyncSession,
     user: AppUser,
     source_type: SourceType,
@@ -106,36 +105,19 @@ async def _parse_and_store_file(
         size_bytes=len(data),
         storage_key=f"uploads/{user.id}/{uuid.uuid4()}{ext}",
         shareable=shareable,
-        parse_status="pending",
     )
     await storage.put(upload.storage_key, data)
     db.add(upload)
     await db.flush()
 
-    # 解析：get_parser 对未映射扩展名抛 ValueError，一并隔离为解析失败，
-    # 避免文件已落盘后 500 造成孤儿对象
-    try:
-        parser = get_parser(filename or "")
-        result = await parser.parse_async(filename, data)
-        upload.parse_status = "succeeded"
-        preview = Preview(
-            char_count=result.char_count,
-            page_count=result.page_count,
-            excerpt=result.excerpt,
-        )
-    except Exception as exc:  # noqa: BLE001 —— 单文件失败隔离（NFR-5）
-        upload.parse_status = "failed"
-        upload.parse_error = str(exc)
-        preview = None
-
-    # 解析产物 → resource
+    # 解析不在上传时执行（上传只落盘登记），统一推迟到任务预处理阶段
     resource = Resource(
         upload_id=upload.id,
         source_type=source_type,
         school_id=school_id,
         course_id=course_id,
         parsed_key=None,
-        char_count=result.char_count if preview else None,
+        char_count=None,
         is_shared=shareable and school_id is not None and course_id is not None,
     )
     db.add(resource)
@@ -149,9 +131,6 @@ async def _parse_and_store_file(
         filename=upload.filename,
         size_bytes=upload.size_bytes,
         shareable=upload.shareable,
-        parse_status=upload.parse_status,
-        parse_error=upload.parse_error,
-        preview=preview,
     )
 
 
@@ -166,7 +145,6 @@ async def _store_text(
         source_type=source_type,
         raw_text=raw_text,
         shareable=False,
-        parse_status="succeeded",
     )
     db.add(upload)
     await db.flush()
@@ -188,9 +166,6 @@ async def _store_text(
         filename=None,
         size_bytes=None,
         shareable=False,
-        parse_status=upload.parse_status,
-        parse_error=None,
-        preview=Preview(char_count=len(raw_text), page_count=None, excerpt=raw_text[:200]),
     )
 
 
@@ -228,7 +203,7 @@ async def create_upload(
         filename = getattr(file, "filename", None) or "upload"
         data = await _read_capped(file, settings.max_upload_size_bytes)
 
-        return await _parse_and_store_file(
+        return await _store_file(
             db, user, source_type, filename, data, shareable
         )
 

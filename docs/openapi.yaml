@@ -121,7 +121,7 @@ paths:
               $ref: '#/components/schemas/TextUploadCreate'
       responses:
         '201':
-          description: 上传或文本提交已受理，返回解析预览
+          description: 上传或文本提交已受理（解析在任务预处理阶段执行，本接口不返回预览）
           content:
             application/json:
               schema:
@@ -514,23 +514,10 @@ components:
           minLength: 1
           maxLength: 200000
           description: 文本正文；extra_requirement 另受 max_extra_requirement_chars（默认 2000）限制
-    Preview:
-      type: object
-      description: 解析预览
-      properties:
-        char_count:
-          type: integer
-          description: 解析出的字符数
-        page_count:
-          type: integer
-          description: 页数（PDF/PPT），无页概念时为 null
-        excerpt:
-          type: string
-          description: 正文摘录
     Upload:
       type: object
       description: 上传件（响应）
-      required: [upload_id, source_type, parse_status]
+      required: [upload_id, source_type]
       properties:
         upload_id:
           type: string
@@ -547,15 +534,7 @@ components:
           description: 文件大小，手动输入时为 null
         shareable:
           type: boolean
-        parse_status:
-          type: string
-          enum: [succeeded, failed]
-          description: 解析失败仍返回 201 并置 failed 与 parse_error
-        parse_error:
-          type: string
-          nullable: true
-        preview:
-          $ref: '#/components/schemas/Preview'
+          description: 是否愿意共享入知识库；手动输入恒为 false
     JobCreate:
       type: object
       description: 创建任务请求

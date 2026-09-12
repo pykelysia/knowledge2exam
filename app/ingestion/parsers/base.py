@@ -44,7 +44,6 @@ class ImageInfo:
 class ParseResult:
     char_count: int
     page_count: int | None
-    excerpt: str
     text: str
     images: list[ImageInfo] | None = None
 

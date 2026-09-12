@@ -18,6 +18,5 @@ class PlainTextParser(Parser):
         return ParseResult(
             char_count=len(text),
             page_count=None,
-            excerpt=text[:200],
             text=text,
         )

@@ -76,7 +76,6 @@ class PPTXParser(Parser):
         return ParseResult(
             char_count=len(text),
             page_count=page_count,
-            excerpt=text[:200],
             text=text,
             images=images if images else None,
         )

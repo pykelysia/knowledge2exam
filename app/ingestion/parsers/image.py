@@ -36,7 +36,6 @@ class ImageParser(Parser):
         return ParseResult(
             char_count=len(ocr_text.strip()),
             page_count=None,
-            excerpt=ocr_text.strip()[:200],
             text=ocr_text.strip(),
             images=[image_info],
         )
