@@ -207,9 +207,9 @@ async def list_jobs(
     seq_by_job: dict[uuid.UUID, int] = {}
     if rows:
         seq_rows = await db.execute(
-            select(JobStage.job_id, func.max(JobStage.seq)).where(
-                JobStage.job_id.in_([j.id for j in rows])
-            )
+            select(JobStage.job_id, func.max(JobStage.seq))
+            .where(JobStage.job_id.in_([j.id for j in rows]))
+            .group_by(JobStage.job_id)
         )
         seq_by_job = {job_id: seq or 0 for job_id, seq in seq_rows.all()}
 
