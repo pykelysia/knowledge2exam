@@ -10,7 +10,8 @@
 - run_page_ocr(renders)   — 并发调用视觉 LLM 把整页转录为 Markdown
 - replace_page_text(text) — 按 `--- Page N ---` 标记把转录结果替换回文档
 
-公共接口：process_images(images) / run_page_ocr(renders) / replace_page_text(...)
+公共接口：process_images(images) / inline_image_text(text, images) /
+run_page_ocr(renders) / replace_page_text(...)
 """
 
 from __future__ import annotations
@@ -83,6 +84,43 @@ def build_merged_text(images: list[ImageInfo], text_separator: str = "\n\n") -> 
     return text_separator.join(p for p in parts if p)
 
 
+# ---------- 上下文融合（占位符回填） ----------
+
+
+def inline_image_text(doc_text: str, images: list[ImageInfo]) -> str | None:
+    """把正文中的图片/图表占位符就地替换为 OCR 结果（混合型上下文融合）。
+
+    - 正常图片：替换为引用块 "> 图：…"；图表区为 "> 图表：…"；
+    - 被跳过/去重/合并/OCR 失败的图片：移除占位符（内容已由保留者承载）；
+    - 正文没有任何占位符时返回 None，调用方回退 build_merged_text 追加文末。
+    """
+    if not images:
+        return None
+    if not any(img.marker and img.marker in doc_text for img in images):
+        return None
+
+    result = doc_text
+    for img in images:
+        if not img.marker or img.marker not in result:
+            continue
+        result = result.replace(img.marker, _inline_replacement(img))
+    # 清理占位符移除后留下的连续空行
+    return re.sub(r"\n{3,}", "\n\n", result).strip("\n")
+
+
+def _inline_replacement(img: ImageInfo) -> str:
+    body = (img.ocr_text or "").strip()
+    if (
+        getattr(img, "_skipped", False)
+        or getattr(img, "_deduped", False)
+        or getattr(img, "_merged", False)
+        or not body
+    ):
+        return ""
+    label = "图表" if img.kind == "chart" else "图"
+    newline = "\n"
+    return f"> {label}：{body.replace(newline, newline + '> ')}"
+
 # ---------- Step 1：预筛选 ----------
 
 
@@ -148,9 +186,15 @@ def _run_ocr(images: list[ImageInfo]) -> None:
         if getattr(img, "_skipped", False) or img.ocr_text or img.data is None:
             continue
         try:
-            img.ocr_text = asyncio.run(
-                asyncio.wait_for(ocr.extract_text(img.data), timeout=_OCR_TIMEOUT_SECONDS)
-            )
+            # 图表区用描述提示词（类型/趋势/数值），图片区维持纯文本转写
+            if img.kind == "chart":
+                img.ocr_text = asyncio.run(
+                    asyncio.wait_for(ocr.describe_chart(img.data), timeout=_OCR_TIMEOUT_SECONDS)
+                )
+            else:
+                img.ocr_text = asyncio.run(
+                    asyncio.wait_for(ocr.extract_text(img.data), timeout=_OCR_TIMEOUT_SECONDS)
+                )
         except Exception as exc:
             img.skipped_reason = f"ocr_failed:{exc}"
             img._skipped = True
