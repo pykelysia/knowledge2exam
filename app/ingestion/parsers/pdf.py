@@ -1,66 +1,187 @@
-"""PDF 解析器：文本层提取 + 页级质量体检 + 损坏页栅格化（供视觉 OCR 兜底）。"""
+"""PDF 解析器：类型检测 + 三路处理（docs/pdf_analyzer.md）。
+
+处理路由由文档级类型（classify_document）决定：
+- pure_text：文本层结构化抽取（TOC/字号标题、段落块、表格 Markdown、图片占位符）；
+- scanned：全部页栅格化（图像增强后）交视觉 LLM 整页转录，阅读顺序由转录承担；
+- mixed：区域切分（文本区/表格区/图表区/图片区），表格转 Markdown，图表/图片
+  经视觉 OCR 后由编排层按占位符回填原文位置（上下文融合）。
+
+`pdf_ocr_mode` 语义保持不变：off 禁用 OCR；always 全页强制渲染；
+auto 按文档类型 + 页级体检路由。
+"""
 
 from __future__ import annotations
+
+import logging
 
 import pymupdf
 
 from app.config import settings
+from app.ingestion.image_enhance import enhance_scan_image
 from app.ingestion.parsers.base import ImageInfo, PageRender, Parser, ParseResult
-from app.ingestion.quality import page_needs_ocr
+from app.ingestion.pdf_layout import (
+    HeadingMap,
+    PageContent,
+    PageStats,
+    PdfType,
+    build_heading_map,
+    classify_document,
+    collect_page_contents,
+    is_region_covered,
+    skip_embedded_images,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class PyMuPDFParser(Parser):
-    """PDF 解析器。
-
-    逐页提取文本层并体检：健康页直接使用（零 LLM 成本）；乱码页（字体缺
-    ToUnicode CMap）与无文本页（扫描件）按 `ocr_dpi` 渲染为 PNG 记入
-    `page_renders`，由编排层调用视觉 LLM 转录后替换对应页文本。
-    """
+    """PDF 解析器：类型检测 + 结构化抽取 + 扫描页栅格化兜底。"""
 
     def parse(self, filename: str, data: bytes) -> ParseResult:
         doc = pymupdf.open(stream=data, filetype="pdf")
+        try:
+            contents = collect_page_contents(doc)
+            pdf_type = classify_document([content.stats for content in contents])
+            headings = build_heading_map(doc, contents)
 
-        mode = getattr(settings, "pdf_ocr_mode", "auto")
-        dpi = getattr(settings, "ocr_dpi", 200)
-        max_ocr_pages = getattr(settings, "ocr_max_pages", 60)
+            mode = getattr(settings, "pdf_ocr_mode", "auto")
+            dpi = getattr(settings, "ocr_dpi", 200)
+            max_ocr_pages = getattr(settings, "ocr_max_pages", 60)
+            enhance = getattr(settings, "pdf_scan_enhance", True)
 
-        full_text_parts: list[str] = []
-        page_renders: list[PageRender] = []
-        renders_truncated = False
-        images: list[ImageInfo] = []
-        page_count = len(doc)
+            text_parts: list[str] = []
+            images: list[ImageInfo] = []
+            page_renders: list[PageRender] = []
+            renders_truncated = False
+            image_seq = 0
+            chart_seq = 0
 
-        for page_num in range(page_count):
-            page = doc[page_num]
-            text = page.get_text()
-            full_text_parts.append(f"--- Page {page_num + 1} ---\n{text}")
+            for content in contents:
+                page = doc[content.stats.page - 1]
+                body, page_images, image_seq, chart_seq = self._assemble_page(
+                    page, content, headings, image_seq, chart_seq
+                )
+                images.extend(page_images)
+                text_parts.append(f"--- Page {content.stats.page} ---\n{body}")
 
-            page_images = self._extract_page_images(doc, page, page_num)
-            images.extend(page_images)
+                if mode == "off":
+                    continue
+                if mode == "always":
+                    need, reason = True, "forced"
+                else:
+                    need, reason = self._needs_render(pdf_type, content.stats)
+                if not need:
+                    continue
+                if len(page_renders) >= max_ocr_pages:
+                    renders_truncated = True
+                    continue
+                png = self._render_page_png(page, dpi)
+                if png is None:
+                    continue
+                if enhance:
+                    png = enhance_scan_image(png)
+                page_renders.append(
+                    PageRender(page=content.stats.page, data=png, reason=reason)
+                )
 
-            if mode == "off":
+            text = "\n\n".join(text_parts)
+            return ParseResult(
+                char_count=len(text),
+                page_count=len(contents),
+                text=text,
+                images=images or None,
+                page_renders=page_renders or None,
+                page_renders_truncated=renders_truncated,
+                pdf_type=pdf_type.value,
+            )
+        finally:
+            doc.close()
+
+    # ---- 区域组装 ----
+
+    def _assemble_page(
+        self,
+        page: pymupdf.Page,
+        content: PageContent,
+        headings: HeadingMap,
+        image_seq: int,
+        chart_seq: int,
+    ) -> tuple[str, list[ImageInfo], int, int]:
+        """把单页各区域按阅读顺序（y0, x0）组装为 Markdown 正文。
+
+        返回 (正文, 图片/图表信息列表, 更新后的图片序号, 更新后的图表序号)。
+        """
+        page_no = content.stats.page
+        items: list[tuple[float, float, str]] = []
+        covered_regions = [t.bbox for t in content.tables] + [c.bbox for c in content.charts]
+
+        # 文本区：被表格/图表覆盖的块剔除（内容由表格 Markdown / 图表转录承载）
+        for block in content.blocks:
+            if is_region_covered(block.bbox, covered_regions):
                 continue
-            need, reason = (True, "forced") if mode == "always" else page_needs_ocr(text)
-            if not need:
-                continue
-            if len(page_renders) >= max_ocr_pages:
-                renders_truncated = True
-                continue
-            png = self._render_page_png(page, dpi)
-            if png is not None:
-                page_renders.append(PageRender(page=page_num + 1, data=png, reason=reason))
+            text = block.text
+            level = headings.level_for(page_no, block.bbox[1])
+            if level:
+                text = f"{'#' * level} {text}"
+            items.append((block.bbox[1], block.bbox[0], text))
 
-        doc.close()
+        # TOC 中未命中文本块的标题条目（无目标坐标的按页首插入）
+        for y, level, title in headings.take_pending(page_no):
+            heading = f"{'#' * level} {title}".strip()
+            items.append((y if y is not None else -1.0, 0.0, heading))
 
-        text = "\n\n".join(full_text_parts)
-        return ParseResult(
-            char_count=len(text),
-            page_count=page_count,
-            text=text,
-            images=images or None,
-            page_renders=page_renders or None,
-            page_renders_truncated=renders_truncated,
-        )
+        # 表格区：直接转 Markdown
+        for table in content.tables:
+            items.append((table.bbox[1], table.bbox[0], table.markdown))
+
+        # 图片区 / 图表区：登记占位符，OCR 文本由编排层回填
+        page_images: list[ImageInfo] = []
+        if not skip_embedded_images(content.stats):
+            for ref in content.images:
+                image_seq += 1
+                marker = f"[图: p{page_no}-{image_seq}]"
+                page_images.append(
+                    ImageInfo(
+                        page=page_no,
+                        data=ref.data,
+                        bbox=ref.bbox,
+                        order=image_seq,
+                        marker=marker,
+                    )
+                )
+                items.append((ref.bbox[1], ref.bbox[0], marker))
+            for ref in content.charts:
+                png = self._render_region_png(page, ref.bbox)
+                if png is None:
+                    continue
+                chart_seq += 1
+                marker = f"[图表: p{page_no}-{chart_seq}]"
+                page_images.append(
+                    ImageInfo(
+                        page=page_no,
+                        data=png,
+                        bbox=ref.bbox,
+                        order=image_seq + chart_seq,
+                        kind="chart",
+                        marker=marker,
+                    )
+                )
+                items.append((ref.bbox[1], ref.bbox[0], marker))
+
+        items.sort(key=lambda item: (item[0], item[1]))
+        body = "\n\n".join(text for _, _, text in items if text.strip())
+        return body, page_images, image_seq, chart_seq
+
+    # ---- 渲染与路由 ----
+
+    @staticmethod
+    def _needs_render(pdf_type: PdfType, stats: PageStats) -> tuple[bool, str]:
+        """auto 模式的渲染判定：扫描件全页渲染，其余按页级体检。"""
+        if pdf_type is PdfType.SCANNED:
+            return True, stats.ocr_reason or "forced"
+        if stats.ocr_reason:
+            return True, stats.ocr_reason
+        return False, ""
 
     @staticmethod
     def _render_page_png(page: pymupdf.Page, dpi: int) -> bytes | None:
@@ -72,43 +193,12 @@ class PyMuPDFParser(Parser):
             return None
 
     @staticmethod
-    def _extract_page_images(doc, page, page_num: int) -> list[ImageInfo]:
-        """提取单页中的内嵌图片。"""
-        result: list[ImageInfo] = []
+    def _render_region_png(
+        page: pymupdf.Page, bbox: tuple[float, float, float, float]
+    ) -> bytes | None:
+        """按区域 bbox 渲染 PNG（图表区送视觉 LLM 描述）。"""
         try:
-            img_list = page.get_images()
+            pix = page.get_pixmap(clip=pymupdf.Rect(*bbox), dpi=getattr(settings, "ocr_dpi", 200))
+            return pix.tobytes("png")
         except Exception:
-            return result
-
-        for img_item in img_list:
-            xref = img_item[0]
-            try:
-                base_image = doc.extract_image(xref)
-                if base_image is None:
-                    continue
-                image_bytes = base_image.get("image")
-                if image_bytes is None:
-                    continue
-
-                # 尝试获取图片在页面中的位置
-                bbox = None
-                try:
-                    rect = page.get_image_rects(img_item[0])
-                    if rect:
-                        bbox = (rect[0].x0, rect[0].y0, rect[0].x1, rect[0].y1)
-                except Exception:
-                    pass
-
-                result.append(
-                    ImageInfo(
-                        page=page_num + 1,
-                        data=image_bytes,
-                        bbox=bbox,
-                        order=len(result),
-                    )
-                )
-            except Exception:
-                # 单张图片提取失败不影响整体
-                continue
-
-        return result
+            return None
