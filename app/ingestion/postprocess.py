@@ -6,7 +6,11 @@
 3. 跨图合并 — 相邻图片 OCR 文本语义连续则合并为一段，减少碎片
 4. 间隙标记 — 非连续且非重复的相邻图片之间插入间隙标记
 
-公共接口：process_images(images) -> list[ImageInfo]
+另提供页级 OCR 兜底（针对 PDF 损坏页/扫描页的整页渲染图）：
+- run_page_ocr(renders)   — 并发调用视觉 LLM 把整页转录为 Markdown
+- replace_page_text(text) — 按 `--- Page N ---` 标记把转录结果替换回文档
+
+公共接口：process_images(images) / run_page_ocr(renders) / replace_page_text(...)
 """
 
 from __future__ import annotations
@@ -14,9 +18,11 @@ from __future__ import annotations
 import asyncio
 import io
 import math
+import re
 
+from app.config import settings
 from app.ingestion.ocr import VisionLLMOCR
-from app.ingestion.parsers.base import ImageInfo
+from app.ingestion.parsers.base import ImageInfo, PageRender
 
 # ---------- 阈值配置 ----------
 
@@ -304,3 +310,69 @@ def _mark_gaps(images: list[ImageInfo]) -> None:
         )
         gap._gap_marker = _GAP_MARKER
         images.insert(images.index(next_img), gap)
+
+
+# ---------- 页级 OCR（PDF 损坏页/扫描页兜底） ----------
+
+_PAGE_MARKER_RE = re.compile(r"^--- Page (\d+) ---[ \t]*$", re.MULTILINE)
+
+
+def replace_page_text(doc_text: str, page_texts: dict[int, str]) -> str:
+    """把 `--- Page N ---` 标记页的正文替换为视觉 OCR 转录结果。
+
+    未提供替换的页保持原样；doc_text 没有页标记时原样返回。
+    """
+    if not page_texts:
+        return doc_text
+    matches = list(_PAGE_MARKER_RE.finditer(doc_text))
+    if not matches:
+        return doc_text
+
+    parts: list[str] = [doc_text[: matches[0].start()]]
+    for i, match in enumerate(matches):
+        page_no = int(match.group(1))
+        body_end = matches[i + 1].start() if i + 1 < len(matches) else len(doc_text)
+        parts.append(match.group(0) + "\n")
+        replacement = page_texts.get(page_no)
+        if replacement is not None:
+            parts.append(replacement.strip() + "\n\n")
+        else:
+            parts.append(doc_text[match.end() : body_end])
+    return "".join(parts)
+
+
+async def run_page_ocr(
+    renders: list[PageRender],
+    *,
+    concurrency: int = 4,
+    timeout_seconds: float | None = None,
+) -> tuple[dict[int, str], list[PageRender]]:
+    """并发对页面渲染图执行视觉 OCR。
+
+    返回 (成功页的转录结果 {page: markdown}, 失败页列表)。单页失败不影响其他页。
+    """
+    if not renders:
+        return {}, []
+
+    ocr = VisionLLMOCR.from_settings()
+    timeout = (
+        timeout_seconds
+        if timeout_seconds is not None
+        else getattr(settings, "llm_timeout_seconds", 120)
+    )
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def _one(render: PageRender) -> tuple[PageRender, str | None]:
+        async with semaphore:
+            try:
+                markdown = await asyncio.wait_for(
+                    ocr.extract_markdown(render.data), timeout=timeout
+                )
+                return render, (markdown or None)
+            except Exception:
+                return render, None
+
+    pairs = await asyncio.gather(*(_one(render) for render in renders))
+    succeeded = {render.page: markdown for render, markdown in pairs if markdown}
+    failed = [render for render, markdown in pairs if not markdown]
+    return succeeded, failed
