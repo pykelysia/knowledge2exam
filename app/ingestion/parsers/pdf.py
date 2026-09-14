@@ -1,49 +1,75 @@
-"""PDF 解析器：使用 PyMuPDF 提取文本和内嵌图片。"""
+"""PDF 解析器：文本层提取 + 页级质量体检 + 损坏页栅格化（供视觉 OCR 兜底）。"""
 
 from __future__ import annotations
 
 import pymupdf
 
-from app.ingestion.parsers.base import ImageInfo, Parser, ParseResult
+from app.config import settings
+from app.ingestion.parsers.base import ImageInfo, PageRender, Parser, ParseResult
+from app.ingestion.quality import page_needs_ocr
 
 
 class PyMuPDFParser(Parser):
-    """PDF 解析器，逐页提取文本（含页码标记）和内嵌图片。"""
+    """PDF 解析器。
+
+    逐页提取文本层并体检：健康页直接使用（零 LLM 成本）；乱码页（字体缺
+    ToUnicode CMap）与无文本页（扫描件）按 `ocr_dpi` 渲染为 PNG 记入
+    `page_renders`，由编排层调用视觉 LLM 转录后替换对应页文本。
+    """
 
     def parse(self, filename: str, data: bytes) -> ParseResult:
         doc = pymupdf.open(stream=data, filetype="pdf")
 
-        # 逐页提取文本，记录页码
+        mode = getattr(settings, "pdf_ocr_mode", "auto")
+        dpi = getattr(settings, "ocr_dpi", 200)
+        max_ocr_pages = getattr(settings, "ocr_max_pages", 60)
+
         full_text_parts: list[str] = []
-        page_count = len(doc)
-        has_text = False
+        page_renders: list[PageRender] = []
+        renders_truncated = False
         images: list[ImageInfo] = []
+        page_count = len(doc)
 
         for page_num in range(page_count):
             page = doc[page_num]
             text = page.get_text()
-            if text.strip():
-                has_text = True
             full_text_parts.append(f"--- Page {page_num + 1} ---\n{text}")
 
-            # 提取页面内嵌图片
             page_images = self._extract_page_images(doc, page, page_num)
             images.extend(page_images)
+
+            if mode == "off":
+                continue
+            need, reason = (True, "forced") if mode == "always" else page_needs_ocr(text)
+            if not need:
+                continue
+            if len(page_renders) >= max_ocr_pages:
+                renders_truncated = True
+                continue
+            png = self._render_page_png(page, dpi)
+            if png is not None:
+                page_renders.append(PageRender(page=page_num + 1, data=png, reason=reason))
 
         doc.close()
 
         text = "\n\n".join(full_text_parts)
-
-        # 如果没有提取到任何文本，可能是扫描件 PDF
-        if not has_text:
-            text = f"（扫描版 PDF {filename}，共 {page_count} 页，无文本层）"
-
         return ParseResult(
             char_count=len(text),
             page_count=page_count,
             text=text,
-            images=images if images else None,
+            images=images or None,
+            page_renders=page_renders or None,
+            page_renders_truncated=renders_truncated,
         )
+
+    @staticmethod
+    def _render_page_png(page: pymupdf.Page, dpi: int) -> bytes | None:
+        """把页面渲染为 PNG；单页渲染失败不影响整体。"""
+        try:
+            pix = page.get_pixmap(dpi=dpi)
+            return pix.tobytes("png")
+        except Exception:
+            return None
 
     @staticmethod
     def _extract_page_images(doc, page, page_num: int) -> list[ImageInfo]:

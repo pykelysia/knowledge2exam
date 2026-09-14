@@ -1,9 +1,15 @@
-"""按格式分流的解析器。"""
+"""按格式分流的解析器。
+
+docx/pptx/图片统一先规范化为 PDF（见 convert.py），再走 PDF 混合解析
+（页级体检 + 损坏页视觉 OCR 兜底）；soffice 缺失或转换失败时回落原生
+解析器。md/txt 为干净文本，直接读取。
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
+from app.ingestion.convert import ConvertedToPdfParser
 from app.ingestion.parsers.base import (
     SUPPORTED_EXTENSIONS as SUPPORTED_EXTENSIONS,
 )
@@ -30,13 +36,13 @@ def get_parser(filename: str) -> Parser:
         if ext == ".pdf":
             _PARSERS[ext] = PyMuPDFParser()
         elif ext == ".docx":
-            _PARSERS[ext] = DocxParser()
+            _PARSERS[ext] = ConvertedToPdfParser(fallback=DocxParser())
         elif ext == ".pptx":
-            _PARSERS[ext] = PPTXParser()
+            _PARSERS[ext] = ConvertedToPdfParser(fallback=PPTXParser())
+        elif ext in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}:
+            _PARSERS[ext] = ConvertedToPdfParser(fallback=ImageParser())
         elif ext in {".md", ".txt"}:
             _PARSERS[ext] = PlainTextParser()
-        elif ext in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}:
-            _PARSERS[ext] = ImageParser()
         else:
             raise ValueError(f"Unsupported file format: {ext}")
     return _PARSERS[ext]
