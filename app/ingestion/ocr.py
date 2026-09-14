@@ -27,6 +27,15 @@ _EXTRACT_MARKDOWN_PROMPT = (
     "5. 只输出转录结果本身，不要任何解释或前言。"
 )
 
+# 图表区域（混合型 PDF 的矢量图表）：描述 + 转录
+_DESCRIBE_CHART_PROMPT = (
+    "你是专业的图表分析助手。请分析这张图表区域（统计图/函数图/示意图/流程图等）：\n"
+    "1. 说明图表类型与主题，坐标轴含义和图例如有则说明；\n"
+    "2. 描述关键数据、趋势或逻辑关系，重要数值按原图转录；\n"
+    "3. 图中的文字（标题、标签、注释）原样转录；\n"
+    "4. 用简洁的中文 Markdown 输出，不要编造图中不存在的信息。"
+)
+
 
 class VisionLLMOCR:
     """使用视觉 LLM 提取图片中的文本。"""
@@ -54,6 +63,10 @@ class VisionLLMOCR:
     async def extract_markdown(self, image_bytes: bytes) -> str:
         """调用视觉 LLM 把整页内容转录为 Markdown（公式为 LaTeX）。"""
         return await self._invoke(image_bytes, _EXTRACT_MARKDOWN_PROMPT, max_tokens=8192)
+
+    async def describe_chart(self, image_bytes: bytes) -> str:
+        """调用视觉 LLM 描述图表区域（类型/趋势/数值 + 图中文字转录）。"""
+        return await self._invoke(image_bytes, _DESCRIBE_CHART_PROMPT, max_tokens=4096)
 
     async def _invoke(self, image_bytes: bytes, prompt: str, *, max_tokens: int) -> str:
         client = ChatOpenAI(

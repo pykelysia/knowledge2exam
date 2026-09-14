@@ -38,6 +38,10 @@ class ImageInfo:
     order: int = 0
     ocr_text: str | None = None
     skipped_reason: str | None = None
+    # image=图片区（内嵌位图）；chart=图表区（矢量图表的区域渲染图）
+    kind: str = "image"
+    # 正文占位符（如 "[图: p3-1]"）；编排层据此把 OCR 文本回填到原文位置
+    marker: str | None = None
 
 
 @dataclass
@@ -58,6 +62,8 @@ class ParseResult:
     page_renders: list[PageRender] | None = None
     # 超过 ocr_max_pages 时为 True：多出的损坏页未渲染
     page_renders_truncated: bool = False
+    # PDF 类型检测结果（pure_text / scanned / mixed，见 pdf_layout.PdfType）；非 PDF 解析器为 None
+    pdf_type: str | None = None
 
 
 class Parser:
