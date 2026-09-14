@@ -80,8 +80,15 @@ class Settings(BaseSettings):
     max_keypoint_list_chars: int = 3000
     max_extra_requirement_chars: int = 2000
 
-    # OCR（视觉 LLM，复用 LLM 配置或独立配置）
+    # OCR（视觉 LLM，用于损坏页/扫描页兜底；复用 LLM 配置或独立配置）
     ocr_model: str = "gpt-4o"
+    # OCR 专用凭证，留空则回落 llm_api_key / llm_base_url（便于单独接支持视觉的端点）
+    ocr_api_key: str = ""
+    ocr_base_url: str = ""
+    # PDF 页级 OCR：渲染 DPI、单次任务最多 OCR 的页数、触发模式（auto=坏页才 OCR / off / always）
+    ocr_dpi: int = 200
+    ocr_max_pages: int = 60
+    pdf_ocr_mode: str = "auto"
 
     # Debug 模式（仅开发环境使用）
     debug_mode: bool = False
