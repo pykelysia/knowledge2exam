@@ -13,6 +13,7 @@ from app.ingestion.parsers import get_parser
 from app.ingestion.parsers.pdf import PyMuPDFParser
 from app.ingestion.postprocess import replace_page_text, run_page_ocr
 from tests.ingestion.test_parsers import _make_docx, _make_pdf
+from tests.ingestion.test_pdf_layout import _make_scan_pdf
 
 
 @pytest.fixture
@@ -91,6 +92,39 @@ class TestRunPageOcrAndReplace:
         assert "--- Page 1 ---" in merged  # 失败页保留原文
         assert "--- Page 2 ---" in merged
         assert "--- Page 3 ---" in merged
+
+
+class TestScannedDocFlow:
+    async def test_scan_pdf_all_pages_replaced_by_ocr(self, monkeypatch) -> None:
+        """扫描件（整页图片无文本层）在 auto 模式下全页渲染并被 OCR 替换。"""
+        monkeypatch.setattr(settings, "pdf_ocr_mode", "auto")
+        monkeypatch.setattr(settings, "ocr_dpi", 72)
+
+        result = await PyMuPDFParser().parse_async("scan.pdf", _make_scan_pdf(pages=2))
+        assert result.pdf_type == "scanned"
+        assert result.page_renders is not None
+        assert len(result.page_renders) == 2
+
+        monkeypatch.setattr(
+            VisionLLMOCR, "from_settings", classmethod(lambda cls: _FakeOCR(fail_first_n=0))
+        )
+        succeeded, failed = await run_page_ocr(result.page_renders)
+        assert not failed
+        assert set(succeeded) == {1, 2}
+
+        merged = replace_page_text(result.text, succeeded)
+        assert "OCR转录-" in merged
+        assert merged.count("--- Page") == 2
+        assert merged.count("OCR转录-") == 2
+
+    async def test_scan_pdf_render_is_enhanced_png(self, monkeypatch) -> None:
+        """默认开启图像增强时，渲染图仍是合法 PNG。"""
+        monkeypatch.setattr(settings, "pdf_ocr_mode", "auto")
+        monkeypatch.setattr(settings, "ocr_dpi", 72)
+
+        result = await PyMuPDFParser().parse_async("scan.pdf", _make_scan_pdf(pages=1))
+        assert result.page_renders is not None
+        assert result.page_renders[0].data[:8] == b"\x89PNG\r\n\x1a\n"
 
 
 class TestConvertedToPdfParser:

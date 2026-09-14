@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from app.ingestion.ocr import VisionLLMOCR
 from app.ingestion.parsers.base import ImageInfo
 from app.ingestion.postprocess import (
     _deduplicate,
@@ -9,7 +10,9 @@ from app.ingestion.postprocess import (
     _jaccard_similarity,
     _mark_gaps,
     _merge_continuous,
+    _run_ocr,
     build_merged_text,
+    inline_image_text,
     process_images,
 )
 
@@ -195,3 +198,92 @@ class TestEdgeCases:
         assert images[0]._merged_count == 3
         assert images[1]._merged is True
         assert images[2]._merged is True
+
+
+# ---------- inline_image_text（占位符回填） ----------
+
+
+def _marker_image(marker: str, ocr_text: str | None, kind: str = "image") -> ImageInfo:
+    return ImageInfo(page=1, marker=marker, kind=kind, ocr_text=ocr_text)
+
+
+class TestInlineImageText:
+    def test_replaces_marker_in_place(self) -> None:
+        text = "前文段落。\n\n[图: p1-1]\n\n后文段落。"
+        out = inline_image_text(text, [_marker_image("[图: p1-1]", "图里的文字")])
+        assert out is not None
+        assert "> 图：图里的文字" in out
+        assert "[图: p1-1]" not in out
+        assert "前文段落。" in out
+        assert "后文段落。" in out
+
+    def test_chart_label(self) -> None:
+        out = inline_image_text(
+            "[图表: p1-1]", [_marker_image("[图表: p1-1]", "折线图", kind="chart")]
+        )
+        assert out is not None
+        assert "> 图表：折线图" in out
+
+    def test_multiline_ocr_quoted(self) -> None:
+        out = inline_image_text("[图: p1-1]", [_marker_image("[图: p1-1]", "第一行\n第二行")])
+        assert out is not None
+        assert "> 图：第一行\n> 第二行" in out
+
+    def test_skipped_marker_removed(self) -> None:
+        img = _marker_image("[图: p1-1]", None)
+        img._skipped = True
+        out = inline_image_text("前文\n\n[图: p1-1]\n\n后文", [img])
+        assert out is not None
+        assert "[图: p1-1]" not in out
+        assert "前文" in out and "后文" in out
+
+    def test_deduped_marker_removed(self) -> None:
+        img = _marker_image("[图: p1-1]", "重复内容")
+        img._deduped = True
+        out = inline_image_text("[图: p1-1]", [img])
+        assert out is not None
+        assert "重复内容" not in out
+
+    def test_no_markers_returns_none(self) -> None:
+        assert inline_image_text("无占位符正文", [_marker_image("[图: p1-1]", "x")]) is None
+        assert inline_image_text("无占位符正文", []) is None
+
+    def test_marker_left_out_of_text_is_ignored(self) -> None:
+        # 图片有 marker 但正文没有（如该页被整页 OCR 替换）→ 不影响其他 marker 回填
+        text = "正文 [图: p1-2] 引用"
+        images = [
+            _marker_image("[图: p1-1]", "丢失页"),
+            _marker_image("[图: p1-2]", "正常图"),
+        ]
+        out = inline_image_text(text, images)
+        assert out is not None
+        assert "> 图：正常图" in out
+        assert "丢失页" not in out
+
+
+# ---------- _run_ocr 的 kind 分流 ----------
+
+
+class _SpyOCR:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def extract_text(self, image_bytes: bytes) -> str:
+        self.calls.append("text")
+        return "T"
+
+    async def describe_chart(self, image_bytes: bytes) -> str:
+        self.calls.append("chart")
+        return "C"
+
+
+class TestRunOcrKindRouting:
+    def test_chart_uses_describe_prompt(self, monkeypatch) -> None:
+        spy = _SpyOCR()
+        monkeypatch.setattr(VisionLLMOCR, "from_settings", classmethod(lambda cls: spy))
+        chart = ImageInfo(page=1, data=b"chart", kind="chart")
+        image = ImageInfo(page=2, data=b"image")
+        _run_ocr([chart, image])
+        assert spy.calls == ["chart", "text"]
+        assert chart.ocr_text == "C"
+        assert image.ocr_text == "T"
