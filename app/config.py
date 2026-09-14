@@ -89,6 +89,8 @@ class Settings(BaseSettings):
     ocr_dpi: int = 200
     ocr_max_pages: int = 60
     pdf_ocr_mode: str = "auto"
+    # 扫描页图像增强（灰度 + 自动对比度 + 轻锐化），关闭则原始渲染图直接送 OCR
+    pdf_scan_enhance: bool = True
 
     # Debug 模式（仅开发环境使用）
     debug_mode: bool = False
