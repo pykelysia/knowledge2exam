@@ -41,11 +41,23 @@ class ImageInfo:
 
 
 @dataclass
+class PageRender:
+    """需要视觉 OCR 兜底的页面渲染图（PNG）。"""
+    page: int  # 1-based 页码
+    data: bytes
+    reason: str = ""  # garbled | no_text | forced
+
+
+@dataclass
 class ParseResult:
     char_count: int
     page_count: int | None
     text: str
     images: list[ImageInfo] | None = None
+    # 需要视觉 OCR 的页面渲染图，由解析器产出；编排层负责调用 OCR 并替换页文本
+    page_renders: list[PageRender] | None = None
+    # 超过 ocr_max_pages 时为 True：多出的损坏页未渲染
+    page_renders_truncated: bool = False
 
 
 class Parser:
