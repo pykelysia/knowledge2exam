@@ -112,9 +112,13 @@ class TestGetParser:
             get_parser("legacy.doc")
 
     def test_supported_extensions_resolve(self) -> None:
+        from app.ingestion.convert import ConvertedToPdfParser
+
         assert isinstance(get_parser("a.pdf"), PyMuPDFParser)
-        assert isinstance(get_parser("b.docx"), DocxParser)
-        assert isinstance(get_parser("c.pptx"), PPTXParser)
+        # docx/pptx/图片统一先规范化为 PDF；soffice 缺失时在解析期回落原生解析器
+        assert isinstance(get_parser("b.docx"), ConvertedToPdfParser)
+        assert isinstance(get_parser("c.pptx"), ConvertedToPdfParser)
+        assert isinstance(get_parser("e.png"), ConvertedToPdfParser)
         assert isinstance(get_parser("d.md"), PlainTextParser)
 
 
