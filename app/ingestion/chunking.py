@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass
 
 from app.core.debug_log import log_step
 from app.core.enums import SourceType
+
+# PDF 页标记（与 postprocess.replace_page_text 保持同一格式约定）
+_PAGE_MARKER_RE = re.compile(r"^--- Page (\d+) ---[ \t]*$", re.MULTILINE)
 
 
 @dataclass
@@ -72,6 +76,38 @@ class Chunker:
 
         return chunks
 
+    def chunk_pdf(self, text: str, source_type: SourceType | None = None) -> list[Chunk]:
+        """PDF 文本切块：按 `--- Page N ---` 标记分段，chunk.page 精确记页。
+
+        页界即块界（与 PPTX 每页一块的策略一致）：段落只在页内合并，
+        跨页段落不回溯 overlap——换取 chunk.page 与内容所在页严格对应，
+        便于检索命中后引用页码。无页标记的文本回退 chunk(page=None)。
+        """
+        if "--- Page " not in text:
+            return self.chunk(text, page=None, source_type=source_type)
+
+        matches = list(_PAGE_MARKER_RE.finditer(text))
+        segments: list[tuple[int | None, str]] = []
+        if matches:
+            head = text[: matches[0].start()].strip()
+            if head:
+                segments.append((None, head))
+            for i, match in enumerate(matches):
+                end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+                body = text[match.end() : end].strip()
+                segments.append((int(match.group(1)), body))
+        else:
+            segments.append((None, text))
+
+        chunks: list[Chunk] = []
+        for page, body in segments:
+            paragraphs = [(page, p.strip()) for p in body.split("\n\n") if p.strip()]
+            chunks.extend(self._merge_paragraphs(paragraphs, source_type))
+        # chunk_index 全局连续（入库幂等键为 (resource_id, chunk_index)）
+        for index, chunk in enumerate(chunks):
+            chunk.chunk_index = index
+        return chunks
+
     def _chunk_by_page(
         self,
         text: str,
@@ -96,36 +132,45 @@ class Chunker:
         source_type: SourceType | None = None,
     ) -> list[Chunk]:
         """PDF 切块：按语义段落合并。"""
-        # 简单实现：先按段落拆分，再合并至接近 chunk_size
-        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+        paragraphs = [(page, p.strip()) for p in text.split("\n\n") if p.strip()]
+        return self._merge_paragraphs(paragraphs, source_type)
+
+    def _merge_paragraphs(
+        self,
+        paragraphs: list[tuple[int | None, str]],
+        source_type: SourceType | None = None,
+    ) -> list[Chunk]:
+        """段落贪心合并至接近 chunk_size；chunk.page 取首段页码。"""
         chunks: list[Chunk] = []
-        current: list[str] = []
+        current: list[tuple[int | None, str]] = []
         current_len = 0
 
-        for para in paragraphs:
+        for page, para in paragraphs:
             if current_len + len(para) > self.chunk_size and current:
-                chunk_text = "\n\n".join(current)
+                chunk_text = "\n\n".join(p for _, p in current)
                 chunks.append(
                     Chunk(
                         text=chunk_text,
-                        page=page,
+                        page=current[0][0],
                         chunk_index=len(chunks),
                         source_type=source_type,
                     )
                 )
                 # 保留 overlap
-                overlap_text = current[-1] if current else ""
-                current = [overlap_text, para] if overlap_text else [para]
-                current_len = sum(len(p) for p in current)
+                overlap_page, overlap_text = current[-1]
+                current = ([(overlap_page, overlap_text)] if overlap_text else []) + [
+                    (page, para)
+                ]
+                current_len = sum(len(p) for _, p in current)
             else:
-                current.append(para)
+                current.append((page, para))
                 current_len += len(para)
 
         if current:
             chunks.append(
                 Chunk(
-                    text="\n\n".join(current),
-                    page=page,
+                    text="\n\n".join(p for _, p in current),
+                    page=current[0][0],
                     chunk_index=len(chunks),
                     source_type=source_type,
                 )
