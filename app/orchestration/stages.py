@@ -32,7 +32,13 @@ from app.core.storage import StorageError, storage
 from app.ingestion.chunking import Chunk, Chunker
 from app.ingestion.embedding import EmbeddingClient
 from app.ingestion.parsers import get_parser
-from app.ingestion.postprocess import build_merged_text, process_images
+from app.ingestion.parsers.base import ParseResult
+from app.ingestion.postprocess import (
+    build_merged_text,
+    process_images,
+    replace_page_text,
+    run_page_ocr,
+)
 from app.models.job import Job, JobUpload
 from app.models.plan import PlanItem
 from app.models.resource import Resource
@@ -414,6 +420,55 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _apply_page_ocr(
+    job: Job, bus: EventBus, upload: Upload, result: ParseResult
+) -> set[int]:
+    """对解析器标记的损坏页执行视觉 OCR；成功页替换文本，失败页保留原文并告警。
+
+    返回成功完成 OCR 的页码集合（1-based），供调用方跳过这些页的内嵌图片 OCR。
+    """
+    try:
+        page_texts, failed = await run_page_ocr(result.page_renders or [])
+    except Exception as exc:
+        logger.warning("job=%s upload=%s 页级 OCR 整体失败: %s", job.id, upload.id, exc)
+        failed = list(result.page_renders or [])
+        page_texts = {}
+
+    if page_texts:
+        result.text = replace_page_text(result.text, page_texts)
+        result.char_count = len(result.text)
+
+    for render in failed:
+        await bus.emit(
+            job.id,
+            "warning",
+            {
+                "code": ErrorCode.OCR_DEGRADED,
+                "upload_id": upload.id,
+                "message": (
+                    f"第 {render.page} 页文本层损坏（{render.reason}），"
+                    "视觉识别失败，该页内容可能缺失"
+                ),
+            },
+        )
+
+    if result.page_renders_truncated:
+        await bus.emit(
+            job.id,
+            "warning",
+            {
+                "code": ErrorCode.OCR_DEGRADED,
+                "upload_id": upload.id,
+                "message": (
+                    "损坏页数超过上限 "
+                    f"(ocr_max_pages={getattr(settings, 'ocr_max_pages', 60)})，"
+                    "部分页面未做视觉识别"
+                ),
+            },
+        )
+    return set(page_texts)
+
+
 async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, Any]:
     """解析所有上传件，切块嵌入，把用户材料写入 agent 工作区。"""
     # 1. 加载 uploads（按创建时间排序，保证材料命名与撞名后缀的确定性）
@@ -452,6 +507,17 @@ async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, An
                     raise StorageError(f"上传件缺少存储对象: id={upload.id}")
                 data = await storage.get(upload.storage_key)
                 result = await parser.parse_async(upload.filename or "", data)
+
+                # 页级视觉 OCR 兜底：损坏页/扫描页整页转录为 Markdown（失败保留原文并告警）
+                ocr_pages: set[int] = set()
+                if result.page_renders:
+                    ocr_pages = await _apply_page_ocr(job, bus, upload, result)
+
+                # 整页已被视觉 OCR 覆盖的页面，跳过其内嵌图片的单独 OCR（避免内容重复）
+                if result.images and ocr_pages:
+                    result.images = [
+                        img for img in result.images if img.page not in ocr_pages
+                    ] or None
 
                 # 图片后处理（OCR 在工作线程内执行）：去重、合并、间隙标记
                 if result.images:
