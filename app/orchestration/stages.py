@@ -35,6 +35,7 @@ from app.ingestion.parsers import get_parser
 from app.ingestion.parsers.base import ParseResult
 from app.ingestion.postprocess import (
     build_merged_text,
+    inline_image_text,
     process_images,
     replace_page_text,
     run_page_ocr,
@@ -522,10 +523,18 @@ async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, An
                 # 图片后处理（OCR 在工作线程内执行）：去重、合并、间隙标记
                 if result.images:
                     await asyncio.to_thread(process_images, result.images)
-                    image_text = await asyncio.to_thread(build_merged_text, result.images)
-                    if image_text:
-                        result.text = result.text + "\n\n" + image_text
-                        result.char_count = len(result.text)
+                    # 占位符就地融合（PDF 图片/图表引用回填原文位置）；
+                    # 无占位符的解析产物（旧格式/其他解析器）回退文末追加
+                    inlined = await asyncio.to_thread(
+                        inline_image_text, result.text, result.images
+                    )
+                    if inlined is not None:
+                        result.text = inlined
+                    else:
+                        image_text = await asyncio.to_thread(build_merged_text, result.images)
+                        if image_text:
+                            result.text = result.text + "\n\n" + image_text
+                    result.char_count = len(result.text)
 
                 text = result.text
                 char_count = result.char_count
@@ -570,11 +579,8 @@ async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, An
             exclusive_texts.setdefault(upload.source_type.value, []).append(text)
         elif upload.source_type in FILE_SOURCE_TYPES:
             # 可向量化的文件类（book / lecture / note）：切块 + 嵌入
-            chunks = chunker.chunk(
-                text,
-                page=None,
-                source_type=upload.source_type,
-            )
+            # PDF 产物按 `--- Page N ---` 标记追踪页码写入 chunk.page
+            chunks = chunker.chunk_pdf(text, source_type=upload.source_type)
             if chunks:
                 # 批量嵌入
                 embeddings = await embedder.embed([c.text for c in chunks])
