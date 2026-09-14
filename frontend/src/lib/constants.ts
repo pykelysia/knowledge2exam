@@ -75,6 +75,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
   AGENT_WARNING: '生成过程告警，请留意任务日志',
   PIPELINE_FAILED: '任务执行失败，请查看任务日志或稍后重试',
   SERVER_RESTARTED: '服务重启导致任务中断，请重新创建任务',
+  OCR_DEGRADED: '部分页面文本层损坏，已尝试视觉识别，个别页面内容可能缺失',
 }
 
 /** 将任意错误码映射为可展示的中文提示。 */

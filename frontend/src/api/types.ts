@@ -201,6 +201,7 @@ export type ErrorCode =
   | 'AGENT_WARNING'
   | 'PIPELINE_FAILED'
   | 'SERVER_RESTARTED'
+  | 'OCR_DEGRADED'
   | 'MODEL_UNAVAILABLE'
   | 'RATE_LIMITED'
   | 'USER_EXISTS'
@@ -248,7 +249,7 @@ export interface QuestionCompletedData {
 }
 
 export interface WarningData {
-  code: 'PARSE_FAILED' | 'AGENT_WARNING' | 'RENDER_FAILED'
+  code: 'PARSE_FAILED' | 'OCR_DEGRADED' | 'AGENT_WARNING' | 'RENDER_FAILED'
   upload_id?: string | null
   message: string
 }

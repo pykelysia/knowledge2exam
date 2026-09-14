@@ -225,7 +225,7 @@ paths:
           `reference_used` 当前恒为 `agent_planning`
         - `question_completed`：`{seq, question_type, completed, total}` —— 单题通过校验并落盘
         - `warning`：`{code, upload_id?, message}` —— 非致命告警；
-          `code` ∈ PARSE_FAILED / AGENT_WARNING / RENDER_FAILED
+          `code` ∈ PARSE_FAILED / OCR_DEGRADED / AGENT_WARNING / RENDER_FAILED
         - `error`：`{error_code, message}` —— 管线意外异常，任务定格 failed
         - `done`：`{status, total?, abandoned?, md_url?, pdf_url?}` —— 终态关闭事件；
           `status` ∈ completed / partially_completed / failed / cancelled（取消时仅含 status）
@@ -613,7 +613,7 @@ components:
       properties:
         code:
           type: string
-          enum: [PARSE_FAILED, AGENT_WARNING, RENDER_FAILED]
+          enum: [PARSE_FAILED, OCR_DEGRADED, AGENT_WARNING, RENDER_FAILED]
         upload_id:
           type: string
           format: uuid
@@ -806,6 +806,7 @@ components:
         - JOB_NOT_READY
         - JOB_ALREADY_FINISHED
         - PARSE_FAILED
+        - OCR_DEGRADED
         - MODERATION_REJECTED
         - PLANNING_FAILED
         - GENERATION_EXHAUSTED
