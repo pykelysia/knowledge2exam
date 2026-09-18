@@ -1,38 +1,62 @@
 ---
-description: 题目文件 schema、出题规范与改写尺度。写 questions/NNN.json 前必读。
+description: 试卷 Markdown 直写规范、出题质量要求与改写尺度。写 output/paper.md 前必读。
 ---
 
 # 出题规范（exam-authoring）
 
-## 题目文件 schema
+## 试卷文件与整体结构
 
-每道题一个文件：`questions/NNN.json`，NNN 为三位题号（001、002……），内容为符合下述
-schema 的 **纯 JSON**（不要包裹 markdown 代码块）：
+整卷只有一份文件：`output/paper.md`，由你用 edit_file 直接书写。题卷在前，
+《参考答案与解析》单独成篇，两部分用 `---` 分隔：
 
-```json
-{
-  "seq": 3,
-  "question_type": "choice | blank | short_answer",
-  "stem": "题干；填空题空位用 ______ 表示",
-  "options": {"A": "...", "B": "...", "C": "...", "D": "..."},
-  "answer": "B",
-  "sub_questions": ["(1) ...", "(2) ..."],
-  "sub_answers": ["...", "..."],
-  "explanation": "答案解析"
-}
+```markdown
+# 试卷（90 分钟）
+
+## 一、选择题
+
+1. 题干……
+   A. ……
+   B. ……
+   C. ……
+   D. ……
+
+2. ……
+
+## 二、填空题
+
+3. 题干，空位用 ______ 表示……
+
+## 三、简答题
+
+5. 题干……
+   （1）子问题一……
+   （2）子问题二……
+
+---
+
+# 参考答案与解析
+
+1. B
+   解析：……
+
+2. ……
 ```
 
-字段规则：
+结构规则：
 
-| 题型 | 必填 | 禁止 |
+- 题号跨题型**连续递增**（不因换节重新从 1 开始）。
+- 题型分节固定为：一、选择题 / 二、填空题 / 三、简答题（可按蓝图只出现其中部分）。
+- 答案篇的编号与题卷题号一一对应；开启解析开关时每题答案后跟 `解析：……`，
+  未开启时不要出现任何解析段落。
+- 简答题有子问题时，题卷用 （1）（2） 列出子问题，答案篇逐子问题作答。
+
+## 各题型细则
+
+| 题型 | 必须包含 | 禁止 |
 | --- | --- | --- |
-| choice | stem、options(A-D 全部非空)、answer(∈A/B/C/D) | sub_questions/sub_answers |
-| blank | stem、answer | options、sub_questions/sub_answers |
-| short_answer | stem、answer（有子问题时 answer 可写「见各子问题答案」） | options |
-
-- `sub_questions` 与 `sub_answers` 必须同时提供或同时省略，且长度相等、按索引对应。
-- `explanation`：用户开启解析开关时**每题必填**；未开启时**不要携带**该字段。
-- `seq` 必须与文件名 NNN 及蓝图 todo 的 seq 一致。
+| choice | 题干、A-D 四个选项、答案（∈A/B/C/D） | 子问题 |
+| blank | 题干（空位 ______）、答案 | 选项 |
+| short_answer | 题干、答案（有子问题时逐条作答） | 选项 |
 
 ## 命题质量要求
 
