@@ -1,10 +1,10 @@
 """编排层入口。
 
 真实实现：文件式 ReAct agent（见 app/agents/agent.py）。
-预处理把用户材料写入 agent 工作区（materials/），agent 规划蓝图并逐题
-产出题目文件，最后经 render_paper 工具完成整卷渲染（md + PDF，失败自动
-降级交付 md）；编排层在 agent 返回后仅负责入库（persist_exam_result）与
-提交渲染产物（md_key/pdf_key/状态）。
+预处理把用户材料写入 agent 工作区（agent/materials/），agent 规划蓝图并把
+整卷 Markdown 直接书写到 output/paper.md，最后经 render_paper 工具渲染 PDF
+（失败自动降级交付 md）；编排层在 agent 返回后仅负责入库蓝图
+（persist_exam_result）与提交渲染产物（md_key/pdf_key/状态）。
 """
 
 from __future__ import annotations
@@ -253,7 +253,6 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
     main_agent_context = {
         "duration_minutes": job.duration_minutes,
         "need_explanation": job.need_explanation,
-        "max_retries": settings.agent_max_retries,
         "user_id": job.user_id,
         "school_id": job.school_id,
         "course_id": job.course_id,
@@ -276,13 +275,11 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
             stage=Stage.generating.value,
         )
 
-    async def on_question_accepted(question, completed: int, total: int) -> None:  # noqa: ANN001
+    async def on_progress(completed: int, total: int) -> None:
         await bus.emit(
             job.id,
-            "question_completed",
+            "progress",
             {
-                "seq": question.seq,
-                "question_type": question.question_type,
                 "completed": completed,
                 "total": total,
             },
@@ -314,7 +311,7 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
 
     hooks = AgentHooks(
         on_plan_ready=on_plan_ready,
-        on_question_accepted=on_question_accepted,
+        on_progress=on_progress,
         on_warning=on_warning,
         on_render_start=on_render_start,
     )
@@ -344,7 +341,6 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
         input={"context_keys": list(main_agent_context.keys())},
         output={
             "plan_items": len(main_result.plan_items),
-            "questions": len(main_result.questions),
             "abandoned": len(main_result.abandoned_seqs),
             "completed_normally": main_result.completed_normally,
             "integration": integration_result,
@@ -352,7 +348,7 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
         },
     )
 
-    job.planned_total = integration_result.get("total_questions", 0)
+    job.planned_total = integration_result.get("total_plan_items", 0)
     await db.commit()
 
     # ---------- rendering（提交渲染产物；渲染本体已在 agent 的 render_paper 工具内完成） ----------
@@ -394,7 +390,7 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
         job_id=str(job.id),
         name="rendering",
         stage=Stage.rendering.value,
-        input={"questions_count": len(main_result.questions)},
+        input={"plan_items_count": len(main_result.plan_items)},
         output={
             "render_status": main_result.render_status,
             "render_error": main_result.render_error,
