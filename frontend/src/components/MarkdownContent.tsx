@@ -4,6 +4,14 @@ import rehypeKatex from 'rehype-katex'
 import 'katex/dist/katex.min.css'
 
 /**
+ * 剥离 HTML 注释（如旧版试卷的 `<!-- plan_item: ... -->` 元信息）。
+ * react-markdown 默认把原始 HTML 当作字面文本渲染，注释会直接显示在页面上。
+ */
+function stripHtmlComments(text: string): string {
+  return text.replace(/<!--[\s\S]*?-->/g, '')
+}
+
+/**
  * 归一化数学定界符。remark-math 只识别 $...$ / $$...$$，
  * 而模型偶尔会输出 \(...\) / \[...\]，这里统一转成 $ 定界符。
  */
@@ -26,7 +34,7 @@ export function MarkdownContent({ content, className }: MarkdownContentProps) {
         remarkPlugins={[remarkMath]}
         rehypePlugins={[[rehypeKatex, { throwOnError: false }]]}
       >
-        {normalizeMathDelimiters(content)}
+        {normalizeMathDelimiters(stripHtmlComments(content))}
       </ReactMarkdown>
     </div>
   )

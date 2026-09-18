@@ -1,17 +1,28 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import axios from 'axios'
 import { useParams } from 'react-router-dom'
-import { AlertCircle, Check, Download, PenLine, Terminal, BookOpen } from 'lucide-react'
-import { getJob, cancelJob, listQuestions, resolveArtifactUrl, downloadArtifact } from '@/api/jobs'
+import { AlertCircle, Download, FileText, History, PenLine, Terminal } from 'lucide-react'
+import {
+  getJob,
+  cancelJob,
+  fetchPaperMd,
+  createRevision,
+  listRevisions,
+  resolveArtifactUrl,
+  downloadArtifact,
+} from '@/api/jobs'
 import { useJobStream } from '@/hooks/useJobStream'
+import { useTextSelection } from '@/hooks/useTextSelection'
 import { extractApiError } from '@/api/client'
 import { JOB_STATUS_META, errorMessage } from '@/lib/constants'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardIcon, CardTitle } from '@/components/ui/card'
 import { MarkdownContent } from '@/components/MarkdownContent'
+import { PaperRevisionBox } from '@/components/PaperRevisionBox'
 import { Skeleton } from '@/components/ui/skeleton'
-import type { Job, JobEventData, JobEventType, Question } from '@/api/types'
+import { Spinner } from '@/components/ui/spinner'
+import type { Job, JobEventData, JobEventType, RevisionItem } from '@/api/types'
 
 const STAGE_LABEL: Record<string, string> = {
   preprocessing: '预处理',
@@ -25,8 +36,18 @@ const STAGE_LABEL: Record<string, string> = {
 /** 可取消任务的运行态。 */
 const CANCELLABLE_STATUSES = ['pending', 'preprocessing', 'generating', 'rendering']
 
-/** 已进入出题、可列出题目的状态。 */
-const QUESTION_VISIBLE_STATUSES = ['generating', 'rendering', 'completed', 'partially_completed']
+/** 已进入出题、可预览试卷的状态。 */
+const PAPER_VISIBLE_STATUSES = ['generating', 'rendering', 'completed', 'partially_completed']
+
+/** 可提交划选修订的状态。 */
+const REVISIONABLE_STATUSES = ['completed', 'partially_completed']
+
+/** 修订会话历史的状态徽标。 */
+const REVISION_STATUS_META: Record<string, { label: string; variant: 'default' | 'success' | 'danger' }> = {
+  running: { label: '进行中', variant: 'default' },
+  done: { label: '已完成', variant: 'success' },
+  failed: { label: '失败', variant: 'danger' },
+}
 
 interface LogEntry {
   time: string
@@ -38,30 +59,11 @@ function nowTime() {
   return new Date().toLocaleTimeString('zh-CN', { hour12: false })
 }
 
-/** 答案块：emerald 淡底 + 图标标签。 */
-function AnswerBlock({ content }: { content: string }) {
-  return (
-    <div className="flex items-start gap-2.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-[13px] leading-[1.7] text-emerald-800">
-      <span className="mt-[2px] inline-flex flex-none items-center gap-1 text-xs font-semibold text-emerald-700">
-        <Check className="h-3.5 w-3.5" />
-        答案
-      </span>
-      <MarkdownContent content={content} className="min-w-0 flex-1" />
-    </div>
-  )
-}
-
-/** 解析块：slate 淡底 + 图标标签。 */
-function ExplainBlock({ content }: { content: string }) {
-  return (
-    <div className="flex items-start gap-2.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-[13px] leading-[1.7] text-slate-600">
-      <span className="mt-[2px] inline-flex flex-none items-center gap-1 text-xs font-semibold">
-        <PenLine className="h-3.5 w-3.5" />
-        解析
-      </span>
-      <MarkdownContent content={content} className="min-w-0 flex-1" />
-    </div>
-  )
+function formatDateTime(iso: string): string {
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime())
+    ? iso
+    : d.toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 }
 
 /** SSE 连接状态徽标：open 显示绿色"已连接"，其余显示灰色状态。 */
@@ -87,14 +89,17 @@ function ConnChip({ state }: { state: 'idle' | 'connecting' | 'open' | 'closed' 
 export function JobDetail() {
   const { jobId } = useParams<{ jobId: string }>()
   const [job, setJob] = useState<Job | null>(null)
-  const [questions, setQuestions] = useState<Question[]>([])
+  const [paper, setPaper] = useState<string | null>(null)
+  const [revisions, setRevisions] = useState<RevisionItem[]>([])
+  const [revisionRunning, setRevisionRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [logs, setLogs] = useState<LogEntry[]>([])
-  // 出题进度的单条日志：每完成一题原地更新，不追加（追加会在长任务里刷屏）
+  // 出题进度的单条日志：进度推进时原地更新，不追加（追加会在长任务里刷屏）
   const [progressLine, setProgressLine] = useState<string | null>(null)
   // 任务删除（404）或进入终态后停止轮询
   const [pollingStopped, setPollingStopped] = useState(false)
   const inFlightRef = useRef(false)
+  const paperRef = useRef<HTMLDivElement | null>(null)
 
   const TERMINAL_STATUSES = ['completed', 'partially_completed', 'failed', 'cancelled']
 
@@ -124,11 +129,48 @@ export function JobDetail() {
     }
   }, [])
 
+  /** 拉取整卷 Markdown（任务进行中即为 agent 当前稿）。 */
+  const loadPaper = useCallback(async (id: string) => {
+    try {
+      const text = await fetchPaperMd(id)
+      setPaper(text)
+    } catch {
+      setPaper(null) // 试卷尚未开始书写
+    }
+  }, [])
+
+  /** 拉取修订会话历史；据此维护"修订进行中"状态。 */
+  const loadRevisions = useCallback(async (id: string) => {
+    try {
+      const res = await listRevisions(id)
+      setRevisions(res.revisions)
+      setRevisionRunning(res.revisions.some((r) => r.status === 'running'))
+    } catch {
+      // 历史拉取失败不打断页面
+    }
+  }, [])
+
   // 初始快照。
   useEffect(() => {
     if (!jobId) return
     void load(jobId)
   }, [jobId, load])
+
+  // 试卷预览：进入可见状态即拉取（渐进预览 agent 正在书写的当前稿）。
+  useEffect(() => {
+    if (!jobId || !job) return
+    if (PAPER_VISIBLE_STATUSES.includes(job.status)) {
+      void loadPaper(jobId)
+    }
+  }, [jobId, job?.status, loadPaper])
+
+  // 任务进入可修订状态后拉取会话历史。
+  useEffect(() => {
+    if (!jobId || !job) return
+    if (REVISIONABLE_STATUSES.includes(job.status)) {
+      void loadRevisions(jobId)
+    }
+  }, [jobId, job?.status, loadRevisions])
 
   const handleEvent = useCallback(
     (type: JobEventType, data: JobEventData) => {
@@ -146,15 +188,48 @@ export function JobDetail() {
           setLogs((prev) => [...prev, { time: nowTime(), text: `规划完成：共 ${d.total} 题` }])
           break
         }
-        case 'question_completed': {
+        case 'progress': {
           const d = data as Extract<JobEventData, { completed: number; total: number }>
-          // 进度条同样从事件流实时更新（SSE 打开期间轮询已停止，快照要等 done 才刷新）
           setJob((prev) =>
             prev
               ? { ...prev, progress: { ...prev.progress, completed: d.completed, total: d.total } }
               : prev,
           )
-          setProgressLine(`完成第 ${d.seq} 题（${d.completed}/${d.total}）`)
+          setProgressLine(`已完成 ${d.completed}/${d.total} 题`)
+          break
+        }
+        case 'revision_started': {
+          const d = data as Extract<JobEventData, { round_no: number }>
+          setRevisionRunning(true)
+          setLogs((prev) => [
+            ...prev,
+            { time: nowTime(), text: `第 ${d.round_no} 轮修订开始，agent 正在修改试卷` },
+          ])
+          if (jobId) void loadRevisions(jobId)
+          break
+        }
+        case 'revision_done': {
+          const d = data as Extract<JobEventData, { round_no: number }>
+          setRevisionRunning(false)
+          setLogs((prev) => [...prev, { time: nowTime(), text: `第 ${d.round_no} 轮修订完成` }])
+          if (jobId) {
+            void loadPaper(jobId)
+            void loadRevisions(jobId)
+          }
+          break
+        }
+        case 'revision_failed': {
+          const d = data as Extract<JobEventData, { round_no: number; message?: string }>
+          setRevisionRunning(false)
+          setLogs((prev) => [
+            ...prev,
+            {
+              time: nowTime(),
+              text: `第 ${d.round_no} 轮修订失败：${d.message ?? '未知原因'}`,
+              level: 'error',
+            },
+          ])
+          if (jobId) void loadRevisions(jobId)
           break
         }
         case 'warning': {
@@ -176,7 +251,7 @@ export function JobDetail() {
         }
       }
     },
-    [jobId, load],
+    [jobId, load, loadPaper, loadRevisions],
   )
 
   const { connectionState } = useJobStream({
@@ -193,14 +268,44 @@ export function JobDetail() {
     }, 5000)
     return () => window.clearInterval(timer)
   }, [jobId, connectionState, pollingStopped, load])
+
+  // 修订进行中：轮询会话状态兜底（SSE 在 done 后已关闭，修订事件不一定可达）；
+  // 结束时（true→false）刷新试卷。
+  const wasRevisionRunning = useRef(false)
   useEffect(() => {
-    if (!jobId || !job) return
-    if (QUESTION_VISIBLE_STATUSES.includes(job.status)) {
-      listQuestions(jobId)
-        .then((res) => setQuestions(res.questions))
-        .catch(() => {})
+    if (revisionRunning) wasRevisionRunning.current = true
+  }, [revisionRunning])
+  useEffect(() => {
+    if (!jobId) return
+    if (revisionRunning) {
+      const timer = window.setInterval(() => {
+        void loadRevisions(jobId)
+      }, 4000)
+      return () => window.clearInterval(timer)
     }
-  }, [jobId, job?.status])
+    if (wasRevisionRunning.current) {
+      wasRevisionRunning.current = false
+      void loadPaper(jobId)
+      void loadRevisions(jobId)
+    }
+  }, [jobId, revisionRunning, loadRevisions, loadPaper])
+
+  const revisionable = job !== null && REVISIONABLE_STATUSES.includes(job.status)
+  const { selectionBox, clearSelection } = useTextSelection(paperRef, revisionable && !revisionRunning)
+
+  async function handleSubmitFeedback(feedback: string) {
+    if (!jobId || !selectionBox) return
+    try {
+      await createRevision(jobId, { selection: selectionBox.anchor, feedback })
+      clearSelection()
+      setRevisionRunning(true)
+      setLogs((prev) => [...prev, { time: nowTime(), text: '修订反馈已提交' }])
+      void loadRevisions(jobId)
+    } catch (err) {
+      const apiErr = extractApiError(err)
+      setError(apiErr ? errorMessage(apiErr.error_code) : '提交修订失败')
+    }
+  }
 
   if (error && !job) {
     return (
@@ -240,6 +345,7 @@ export function JobDetail() {
   const pct =
     progress && progress.total ? Math.round((progress.completed! / progress.total) * 100) : 0
   const running = CANCELLABLE_STATUSES.includes(job.status)
+  const paperVisible = PAPER_VISIBLE_STATUSES.includes(job.status)
 
   async function handleCancel() {
     if (!jobId) return
@@ -358,6 +464,102 @@ export function JobDetail() {
         </Card>
       )}
 
+      {/* 整卷预览 + 划选修订 */}
+      {paperVisible && (
+        <Card>
+          <CardHeader className="flex-wrap">
+            <CardIcon>
+              <FileText />
+            </CardIcon>
+            <CardTitle>试卷预览</CardTitle>
+            {revisionRunning ? (
+              <span className="inline-flex items-center gap-2 text-[13px] text-slate-500">
+                <Spinner className="h-3.5 w-3.5" />
+                修订进行中，试卷更新后自动刷新…
+              </span>
+            ) : revisionable ? (
+              <span className="inline-flex items-center gap-1.5 text-[13px] text-slate-500">
+                <PenLine className="h-3.5 w-3.5" />
+                划选试卷中的任意内容，即可提交修订
+              </span>
+            ) : (
+              <span className="text-[13px] text-slate-400">任务完成后可划选内容提交修订</span>
+            )}
+          </CardHeader>
+          <CardContent>
+            {paper === null ? (
+              <div className="space-y-3">
+                {Array.from({ length: 6 }).map((_, i) => (
+                  <Skeleton key={i} className="h-4" style={{ width: `${60 + ((i * 13) % 40)}%` }} />
+                ))}
+              </div>
+            ) : (
+              <div ref={paperRef} className="select-text">
+                <MarkdownContent content={paper} className="text-[13.5px] leading-[1.8] text-slate-800" />
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* 划选反馈框（所选位置下方，可关闭） */}
+      {selectionBox && (
+        <PaperRevisionBox
+          anchor={selectionBox.anchor}
+          rect={selectionBox.rect}
+          running={revisionRunning}
+          onClose={clearSelection}
+          onSubmit={handleSubmitFeedback}
+        />
+      )}
+
+      {/* 修订会话历史 */}
+      {revisions.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardIcon>
+              <History />
+            </CardIcon>
+            <CardTitle>修订历史（{revisions.length}）</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2.5">
+            {revisions.map((r) => {
+              const meta = REVISION_STATUS_META[r.status] ?? REVISION_STATUS_META.running
+              return (
+                <div
+                  key={r.revision_id}
+                  className="rounded-xl border border-slate-200 px-3.5 py-2.5"
+                >
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    <span className="text-[13px] font-semibold text-slate-900">
+                      第 {r.round_no} 轮
+                    </span>
+                    <Badge variant={meta.variant} pulse={r.status === 'running'}>
+                      {meta.label}
+                    </Badge>
+                    <span className="ml-auto text-xs tabular-nums text-slate-400">
+                      {formatDateTime(r.created_at)}
+                    </span>
+                  </div>
+                  {r.selection?.text && (
+                    <p className="mt-1.5 line-clamp-1 text-[12.5px] text-slate-400">
+                      选中：「{r.selection.text}」
+                    </p>
+                  )}
+                  <p className="mt-1 text-[13px] leading-[1.6] text-slate-700">{r.feedback}</p>
+                  {r.status === 'failed' && r.error && (
+                    <p className="mt-1 text-[12.5px] leading-[1.6] text-red-600">{r.error}</p>
+                  )}
+                  {r.status === 'done' && r.summary && (
+                    <p className="mt-1 text-[12.5px] text-slate-400">{r.summary}</p>
+                  )}
+                </div>
+              )
+            })}
+          </CardContent>
+        </Card>
+      )}
+
       {/* 事件日志 */}
       <Card>
         <CardHeader>
@@ -410,91 +612,7 @@ export function JobDetail() {
         </div>
       )}
 
-      {/* 已产出题目 */}
-      {QUESTION_VISIBLE_STATUSES.includes(job.status) && (
-        <Card>
-          <CardHeader>
-            <CardIcon>
-              <BookOpen />
-            </CardIcon>
-            <CardTitle>已产出的题目（{questions.length}）</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3.5">
-            {questions.length === 0 ? (
-              <div className="space-y-3">
-                {Array.from({ length: 3 }).map((_, i) => (
-                  <div key={i} className="space-y-2">
-                    <div className="flex items-center gap-2">
-                      <Skeleton className="h-5 w-8" />
-                      <Skeleton className="h-5 w-12" />
-                    </div>
-                    <Skeleton className="h-4 w-full" />
-                    <Skeleton className="h-4 w-2/3" />
-                  </div>
-                ))}
-              </div>
-            ) : (
-              questions.map((q) => (
-                <div
-                  key={q.seq}
-                  className="space-y-3 rounded-xl border border-slate-200 p-4 transition-[border-color,box-shadow,transform] duration-200 hover:-translate-y-px hover:border-slate-300 hover:shadow-card-hover"
-                >
-                  <div className="flex items-center gap-2.5">
-                    <span className="grid h-[26px] w-[26px] flex-none place-items-center rounded-full bg-slate-900 text-[12.5px] font-semibold tabular-nums text-white shadow-btn">
-                      {q.seq}
-                    </span>
-                    <Badge>
-                      {q.question_type === 'choice'
-                        ? '选择题'
-                        : q.question_type === 'blank'
-                          ? '填空题'
-                          : '简答题'}
-                    </Badge>
-                  </div>
-                  <MarkdownContent content={q.stem} className="text-[13.5px] leading-[1.75] text-slate-800" />
-                  {q.options && (
-                    <ul className="space-y-1">
-                      {Object.entries(q.options).map(([k, v]) => (
-                        <li
-                          key={k}
-                          className="flex items-start gap-2.5 rounded-lg px-2 py-1 text-[13.5px] leading-[1.6] text-slate-700 transition-colors hover:bg-slate-50"
-                        >
-                          <span className="mt-[3px] grid h-[22px] w-[22px] flex-none place-items-center rounded-[7px] bg-slate-100 text-[11.5px] font-semibold text-slate-700">
-                            {k}
-                          </span>
-                          <MarkdownContent content={v} className="min-w-0 flex-1" />
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                  {q.answer && <AnswerBlock content={q.answer} />}
-                  {q.explanation && <ExplainBlock content={q.explanation} />}
-                  {q.sub_questions && q.sub_questions.length > 0 && (
-                    <div className="space-y-2.5">
-                      {q.sub_questions.map((sq, i) => {
-                        const subAnswer = q.sub_answers?.[i]
-                        return (
-                          <div key={i} className="space-y-2">
-                            <div className="flex gap-1.5 text-[13.5px] leading-[1.7] text-slate-700">
-                              <span className="flex-none font-semibold text-slate-800">
-                                ({i + 1})
-                              </span>
-                              <MarkdownContent content={sq} className="min-w-0 flex-1" />
-                            </div>
-                            {subAnswer && <AnswerBlock content={subAnswer} />}
-                          </div>
-                        )
-                      })}
-                    </div>
-                  )}
-                </div>
-              ))
-            )}
-          </CardContent>
-        </Card>
-      )}
-
-      {/* 兜底错误提示（下载失败 / 取消失败等） */}
+      {/* 兜底错误提示（下载失败 / 修订提交失败等） */}
       {error && job && (
         <div className="flex items-start gap-2.5 rounded-[10px] border border-red-200 bg-red-50 px-3.5 py-2.5 text-[13px] leading-relaxed text-red-700">
           <AlertCircle className="mt-0.5 h-4 w-4 flex-none text-red-500" />
