@@ -14,6 +14,7 @@ from app.models.moderation import ModerationRecord
 from app.models.plan import PlanItem
 from app.models.question import Question, RetryLog
 from app.models.resource import Resource
+from app.models.revision import PaperRevision
 from app.models.upload import Upload
 from app.models.user import AppUser
 
@@ -34,4 +35,5 @@ __all__ = [
     "Question",
     "RetryLog",
     "LlmCall",
+    "PaperRevision",
 ]
