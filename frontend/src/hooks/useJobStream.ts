@@ -66,10 +66,13 @@ export function useJobStream({ jobId, onEvent }: UseJobStreamOptions) {
     const eventTypes: JobEventType[] = [
       'stage_changed',
       'plan_ready',
-      'question_completed',
+      'progress',
       'warning',
       'done',
       'error',
+      'revision_started',
+      'revision_done',
+      'revision_failed',
     ]
 
     const listeners: Array<[string, (e: MessageEvent) => void]> = eventTypes.map((type) => {

@@ -1,5 +1,13 @@
 import { client } from '@/api/client'
-import type { Job, JobAccepted, JobCreate, JobsResponse, QuestionsResponse } from '@/api/types'
+import type {
+  Job,
+  JobAccepted,
+  JobCreate,
+  JobsResponse,
+  RevisionAccepted,
+  RevisionCreate,
+  RevisionsResponse,
+} from '@/api/types'
 
 /** 当前用户任务列表（最近 50 条）。 */
 export async function listJobs(): Promise<JobsResponse> {
@@ -26,8 +34,27 @@ export async function cancelJob(jobId: string): Promise<void> {
   await client.post(`/jobs/${jobId}/cancel`)
 }
 
-export async function listQuestions(jobId: string): Promise<QuestionsResponse> {
-  const { data } = await client.get<QuestionsResponse>(`/jobs/${jobId}/questions`)
+/** 拉取试卷全文（Markdown 文本，任务进行中即为当前稿）。 */
+export async function fetchPaperMd(jobId: string): Promise<string> {
+  const { data } = await client.get<string>(`/jobs/${jobId}/paper.md`, {
+    responseType: 'text',
+    transformResponse: [(raw) => raw],
+  })
+  return data
+}
+
+/** 提交一轮划选反馈修订（交回原 agent 续跑）。 */
+export async function createRevision(
+  jobId: string,
+  payload: RevisionCreate,
+): Promise<RevisionAccepted> {
+  const { data } = await client.post<RevisionAccepted>(`/jobs/${jobId}/revisions`, payload)
+  return data
+}
+
+/** 修订会话历史（新→旧）。 */
+export async function listRevisions(jobId: string): Promise<RevisionsResponse> {
+  const { data } = await client.get<RevisionsResponse>(`/jobs/${jobId}/revisions`)
   return data
 }
 

@@ -135,26 +135,43 @@ export interface JobsResponse {
   jobs: Job[]
 }
 
-// ---- 题目 ----
+// ---- 修订（划选反馈） ----
 
-export type QuestionType = 'choice' | 'blank' | 'short_answer'
-
-export interface Question {
-  seq: number
-  question_type: QuestionType
-  stem: string
-  options?: Record<string, string> | null
-  answer: string
-  explanation?: string | null
-  sub_questions?: string[] | null
-  sub_answers?: string[] | null
+export interface SelectionAnchor {
+  text: string
+  before?: string
+  after?: string
 }
 
-export interface QuestionsResponse {
+export interface RevisionCreate {
+  selection: SelectionAnchor
+  feedback: string
+}
+
+export interface RevisionAccepted {
+  revision_id: string
+  round_no: number
+  status: 'running'
+}
+
+export type RevisionStatus = 'running' | 'done' | 'failed'
+
+export interface RevisionItem {
+  revision_id: string
+  round_no: number
+  status: RevisionStatus
+  selection?: SelectionAnchor | null
+  feedback: string
+  summary?: string | null
+  error?: string | null
+  created_at: string
+  applied_at?: string | null
+}
+
+export interface RevisionsResponse {
   job_id: string
-  need_explanation?: boolean
   total: number
-  questions: Question[]
+  revisions: RevisionItem[]
 }
 
 // ---- 学校 / 课程 ----
@@ -193,6 +210,9 @@ export type ErrorCode =
   | 'UPLOAD_IN_USE'
   | 'JOB_NOT_READY'
   | 'JOB_ALREADY_FINISHED'
+  | 'JOB_NOT_FINISHED'
+  | 'REVISION_IN_PROGRESS'
+  | 'PAPER_NOT_READY'
   | 'PARSE_FAILED'
   | 'MODERATION_REJECTED'
   | 'PLANNING_FAILED'
@@ -223,10 +243,13 @@ export interface ErrorResponse {
 export type JobEventType =
   | 'stage_changed'
   | 'plan_ready'
-  | 'question_completed'
+  | 'progress'
   | 'warning'
   | 'done'
   | 'error'
+  | 'revision_started'
+  | 'revision_done'
+  | 'revision_failed'
 
 export interface StageChangedData {
   stage: Stage
@@ -241,11 +264,16 @@ export interface PlanReadyData {
   duration_minutes?: number
 }
 
-export interface QuestionCompletedData {
-  seq: number
-  question_type: QuestionType
+export interface ProgressData {
   completed: number
   total: number
+}
+
+export interface RevisionEventData {
+  round_no: number
+  feedback?: string
+  message?: string
+  render_status?: string
 }
 
 export interface WarningData {
@@ -270,10 +298,11 @@ export interface ErrorData {
 export type JobEventData =
   | StageChangedData
   | PlanReadyData
-  | QuestionCompletedData
+  | ProgressData
   | WarningData
   | DoneData
   | ErrorData
+  | RevisionEventData
 
 export interface JobEvent {
   id?: number
