@@ -19,6 +19,8 @@ tags:
     description: 上传与手动输入
   - name: Jobs
     description: 生成任务、进度与产物
+  - name: Revisions
+    description: 划选反馈修订（job 级会话记录）
   - name: Catalog
     description: 学校与课程列表
 paths:
@@ -223,10 +225,13 @@ paths:
         - `plan_ready`：`{total, distribution, reference_used, duration_minutes}` ——
           agent 出题蓝图就绪；`distribution` 按题型（choice / blank / short_answer）计数，
           `reference_used` 当前恒为 `agent_planning`
-        - `question_completed`：`{seq, question_type, completed, total}` —— 单题通过校验并落盘
+        - `progress`：`{completed, total}` —— 蓝图驱动的出题进度（todo 状态统计）
         - `warning`：`{code, upload_id?, message}` —— 非致命告警；
           `code` ∈ PARSE_FAILED / OCR_DEGRADED / AGENT_WARNING / RENDER_FAILED
         - `error`：`{error_code, message}` —— 管线意外异常，任务定格 failed
+        - `revision_started`：`{round_no, feedback}` —— 一轮划选反馈修订开始
+        - `revision_done`：`{round_no, render_status}` —— 修订完成，试卷已更新并重渲染
+        - `revision_failed`：`{round_no, message}` —— 修订失败（agent 异常或未产生修改）
         - `done`：`{status, total?, abandoned?, md_url?, pdf_url?}` —— 终态关闭事件；
           `status` ∈ completed / partially_completed / failed / cancelled（取消时仅含 status）
       parameters:
@@ -247,29 +252,15 @@ paths:
                 description: "按 `id: <seq>\\nevent: <type>\\ndata: <json>\\n\\n` 帧序列"
         '404':
           $ref: '#/components/responses/JobNotFound'
-  /jobs/{job_id}/questions:
-    get:
-      tags: [Jobs]
-      operationId: listQuestions
-      summary: 已产出的题目列表
-      description: 生成过程中可调用，返回当前已完成的部分。
-      parameters:
-        - $ref: '#/components/parameters/JobId'
-      responses:
-        '200':
-          description: 题目列表
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/QuestionsResponse'
-        '404':
-          $ref: '#/components/responses/JobNotFound'
   /jobs/{job_id}/paper.md:
     get:
       tags: [Jobs]
       operationId: downloadPaperMarkdown
-      summary: 下载 md 试卷
-      description: 题卷在前，答案与解析单独成篇。
+      summary: 获取 md 试卷（含进行中预览）
+      description: |
+        agent 整卷直写 output/paper.md；任务进行中也可调用，返回当前正在书写的稿子
+        （md_key 尚未提交时回退读取工作区文件），支撑前端渐进预览。
+        题卷在前，答案与解析单独成篇。
       parameters:
         - $ref: '#/components/parameters/JobId'
       responses:
@@ -318,6 +309,54 @@ paths:
           $ref: '#/components/responses/JobNotFound'
         '409':
           $ref: '#/components/responses/JobAlreadyFinished'
+  /jobs/{job_id}/revisions:
+    post:
+      tags: [Revisions]
+      operationId: createRevision
+      summary: 提交一轮划选反馈修订
+      description: |
+        用户在试卷预览中划选一部分内容并提出要求；请求交回完成该任务的 agent
+        （同一全套工具，携带划选锚点、反馈与全部历史轮次）直接续跑修改
+        output/paper.md 并重渲染。试卷内容直接生效，修订前后快照留存于
+        paper_revision 表。仅限 completed / partially_completed 任务，且同任务
+        同时只能有一轮修订在跑。
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RevisionCreate'
+      responses:
+        '202':
+          description: 修订已受理，后台续跑
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevisionAccepted'
+        '400':
+          description: 载荷不合法（如 feedback 为空）
+        '404':
+          $ref: '#/components/responses/JobNotFound'
+        '409':
+          description: 任务未完成（JOB_NOT_FINISHED）或已有修订在跑（REVISION_IN_PROGRESS）
+    get:
+      tags: [Revisions]
+      operationId: listRevisions
+      summary: 修订会话历史
+      description: 该任务的全部修订轮次（新→旧），即修订会话记录。
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: 修订历史
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevisionsResponse'
+        '404':
+          $ref: '#/components/responses/JobNotFound'
   /schools:
     get:
       tags: [Catalog]
@@ -689,55 +728,88 @@ components:
     Stage:
       type: string
       enum: [preprocessing, generating, rendering]
-    Question:
+    SelectionAnchor:
       type: object
-      description: 一道题目。`need_explanation=false` 时 `explanation` 不出现；简答题子问题与子答案按索引严格对应。
-      required: [seq, question_type, stem, answer]
+      description: 用户在试卷预览中划选的锚点：选中文本 + 前后文（内容定位，非偏移）。
+      required: [text]
       properties:
-        seq:
-          type: integer
-          description: 试卷内题号
-        question_type:
+        text:
           type: string
-          enum: [choice, blank, short_answer]
-        stem:
+          description: 用户划选的文本
+        before:
           type: string
-        options:
-          type: object
-          nullable: true
-          description: 选择题选项，键为 A/B/C/D
-          additionalProperties:
-            type: string
-        answer:
+          description: 选区前文（少量上下文）
+        after:
           type: string
-        explanation:
-          type: string
-          nullable: true
-        sub_questions:
-          type: array
-          nullable: true
-          items:
-            type: string
-        sub_answers:
-          type: array
-          nullable: true
-          items:
-            type: string
-    QuestionsResponse:
+          description: 选区后文（少量上下文）
+    RevisionCreate:
       type: object
-      required: [job_id, total, questions]
+      description: 提交一轮修订：划选位置与内容 + 用户要求。
+      required: [selection, feedback]
+      properties:
+        selection:
+          $ref: '#/components/schemas/SelectionAnchor'
+        feedback:
+          type: string
+          description: 用户对所选部分的修订要求
+    RevisionAccepted:
+      type: object
+      required: [revision_id, round_no, status]
+      properties:
+        revision_id:
+          type: string
+          format: uuid
+        round_no:
+          type: integer
+          description: 轮次号，从 1 递增
+        status:
+          type: string
+          enum: [running]
+    RevisionItem:
+      type: object
+      description: 修订历史条目（会话记录）。快照不随列表返回。
+      required: [revision_id, round_no, status, feedback, created_at]
+      properties:
+        revision_id:
+          type: string
+          format: uuid
+        round_no:
+          type: integer
+        status:
+          type: string
+          enum: [running, done, failed]
+        selection:
+          allOf:
+            - $ref: '#/components/schemas/SelectionAnchor'
+          nullable: true
+        feedback:
+          type: string
+        summary:
+          type: string
+          nullable: true
+        error:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        applied_at:
+          type: string
+          format: date-time
+          nullable: true
+    RevisionsResponse:
+      type: object
+      required: [job_id, total, revisions]
       properties:
         job_id:
           type: string
           format: uuid
-        need_explanation:
-          type: boolean
         total:
           type: integer
-        questions:
+        revisions:
           type: array
           items:
-            $ref: '#/components/schemas/Question'
+            $ref: '#/components/schemas/RevisionItem'
     SchoolsResponse:
       type: object
       required: [schools]
@@ -805,6 +877,9 @@ components:
         - UPLOAD_IN_USE
         - JOB_NOT_READY
         - JOB_ALREADY_FINISHED
+        - JOB_NOT_FINISHED
+        - REVISION_IN_PROGRESS
+        - PAPER_NOT_READY
         - PARSE_FAILED
         - OCR_DEGRADED
         - MODERATION_REJECTED

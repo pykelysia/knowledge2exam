@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import update
 
-from app.api import artifacts, auth, catalog, jobs, uploads
+from app.api import artifacts, auth, catalog, jobs, revisions, uploads
 from app.config import DEFAULT_JWT_SECRET, settings
 from app.core.db import AsyncSessionLocal
 from app.core.exceptions import AppException, ErrorCode
@@ -103,6 +103,7 @@ app.include_router(uploads.router, prefix=API_PREFIX)
 app.include_router(jobs.router, prefix=API_PREFIX)
 app.include_router(artifacts.router, prefix=API_PREFIX)
 app.include_router(catalog.router, prefix=API_PREFIX)
+app.include_router(revisions.router, prefix=API_PREFIX)
 
 
 @app.exception_handler(AppException)

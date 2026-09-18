@@ -27,10 +27,11 @@ async def download_paper_md(
     job = await db.get(Job, job_id)
     if job is None or job.user_id != user.id:
         raise JobNotFound()
-    if job.md_key is None:
-        raise JobNotReady()
+    # md_key 未提交（任务进行中/早期失败）时回退到工作区正在书写的试卷，
+    # 支撑前端的渐进预览；文件尚不存在才视为产物未就绪。
+    key = job.md_key or f"jobs/{job_id}/output/paper.md"
     try:
-        data = await storage.get(job.md_key)
+        data = await storage.get(key)
     except Exception as exc:  # noqa: BLE001
         raise JobNotReady() from exc
     return Response(

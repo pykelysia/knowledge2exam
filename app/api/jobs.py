@@ -1,4 +1,4 @@
-"""任务端点：列表 / 创建 / 快照 / SSE / 题目 / 取消 / 删除。"""
+"""任务端点：列表 / 创建 / 快照 / SSE / 取消 / 删除。"""
 
 from __future__ import annotations
 
@@ -30,7 +30,6 @@ from app.core.task_registry import register
 from app.models.catalog import Course, School
 from app.models.job import Job, JobStage, JobUpload
 from app.models.plan import PlanItem
-from app.models.question import Question
 from app.models.upload import Upload
 from app.models.user import AppUser
 from app.orchestration.stages import _run_pipeline_with_cancellation
@@ -41,24 +40,19 @@ from app.schemas.job import (
     JobCreate,
     JobsResponse,
     Plan,
-    Progress,
     Warning,
 )
 from app.schemas.job import (
     Job as JobSchema,
 )
-from app.schemas.question import Question as QuestionSchema
-from app.schemas.question import QuestionsResponse
 
 router = APIRouter(tags=["Jobs"])
 
 logger = logging.getLogger(__name__)
 
 
-async def _build_plan_and_progress(
-    db: AsyncSession, job: Job
-) -> tuple[Plan | None, Progress | None]:
-    """从 DB 聚合蓝图分布与逐题进度（agent 产物入库后才有数据）。"""
+async def _build_plan(db: AsyncSession, job: Job) -> Plan | None:
+    """从 DB 聚合蓝图分布（agent 产物入库后才有数据）。"""
     dist_rows = await db.execute(
         select(PlanItem.question_type, func.count(PlanItem.id))
         .where(PlanItem.job_id == job.id, PlanItem.superseded_by.is_(None))
@@ -66,29 +60,16 @@ async def _build_plan_and_progress(
     )
     distribution = {question_type: count for question_type, count in dist_rows.all()}
     if not distribution:
-        return None, None
-
-    completed = await db.scalar(select(func.count(Question.id)).where(Question.job_id == job.id))
-    abandoned = await db.scalar(
-        select(func.count(PlanItem.id)).where(
-            PlanItem.job_id == job.id,
-            PlanItem.superseded_by.is_(None),
-            PlanItem.knowledge_point.like("[已放弃]%"),
-        )
-    )
-    total = sum(distribution.values())
-    plan = Plan(total=total, distribution=distribution)
-    progress = Progress(completed=completed or 0, total=total, abandoned=abandoned or 0)
-    return plan, progress
+        return None
+    return Plan(total=sum(distribution.values()), distribution=distribution)
 
 
 async def _job_to_schema(
     db: AsyncSession, job: Job, last_event_seq: int, *, with_progress: bool = True
 ) -> JobSchema:
     plan: Plan | None = None
-    progress: Progress | None = None
     if with_progress:
-        plan, progress = await _build_plan_and_progress(db, job)
+        plan = await _build_plan(db, job)
     if plan is None and job.planned_total is not None:
         plan = Plan(total=job.planned_total, distribution={})
 
@@ -298,42 +279,6 @@ async def stream_job_events(
 
 def _sse_frame(seq: int, event: str, data: dict) -> str:
     return f"id: {seq}\nevent: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-
-
-@router.get("/jobs/{job_id}/questions", response_model=QuestionsResponse)
-async def list_questions(
-    job_id: uuid.UUID,
-    user: AppUser = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-) -> QuestionsResponse:
-    job = await _get_owned_job(db, job_id, user)
-    rows = (
-        await db.scalars(
-            select(Question)
-            .where(Question.job_id == job_id)
-            .order_by(Question.seq)
-        )
-    ).all()
-
-    questions = [
-        QuestionSchema(
-            seq=q.seq,
-            question_type=q.question_type,
-            stem=q.stem,
-            options=q.options,
-            answer=q.answer,
-            explanation=q.explanation if job.need_explanation else None,
-            sub_questions=q.sub_questions,
-            sub_answers=q.sub_answers,
-        )
-        for q in rows
-    ]
-    return QuestionsResponse(
-        job_id=job_id,
-        need_explanation=job.need_explanation,
-        total=len(questions),
-        questions=questions,
-    )
 
 
 @router.post("/jobs/{job_id}/cancel", status_code=204)
