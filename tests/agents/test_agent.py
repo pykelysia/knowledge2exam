@@ -1,8 +1,7 @@
-"""agent 入口端到端单元测试：fake 模型驱动完整 ReAct 循环。"""
+"""agent 入口端到端单元测试：fake 模型驱动完整 ReAct 循环（生成与修订）。"""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -62,17 +61,16 @@ def fake_intent() -> ExamIntent:
 # fixtures
 # ---------------------------------------------------------------------------
 
+PAPER_V1 = """# 试卷（100 分钟）
 
-def make_question(seq: int, **overrides: object) -> str:
-    data: dict = {
-        "seq": seq,
-        "question_type": "choice",
-        "stem": f"第 {seq} 题题干",
-        "options": {"A": "1", "B": "2", "C": "3", "D": "4"},
-        "answer": "A",
-    }
-    data.update(overrides)
-    return json.dumps(data, ensure_ascii=False)
+## 一、选择题
+
+1. 1+1=？
+   A. 1
+   B. 2
+   C. 3
+   D. 4
+"""
 
 
 class StubVectorStore:
@@ -92,18 +90,22 @@ class StubRenderOnce:
         self.calls += 1
         ctx.render_status = "succeeded"
         ctx.render_error = None
-        return max(len(ctx.todos), 1)
+        return 100
 
 
 @pytest.fixture
 def job_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Workspace:
-    """补丁后的运行环境：本地存储 + 临时 skills + stub 依赖。"""
+    """补丁后的运行环境：本地存储 + 临时 skills + stub 依赖。
+
+    工作区以 job 目录为根（与生产一致）：材料在 agent/materials/，
+    试卷在 output/paper.md。
+    """
     job_id = uuid4()
-    ws = Workspace(LocalStorage(tmp_path), prefix=f"jobs/{job_id}/agent")
+    ws = Workspace(LocalStorage(tmp_path), prefix=f"jobs/{job_id}")
     skills_dir = tmp_path / "skills_installed"
     skill_file = skills_dir / "exam-authoring" / "SKILL.md"
     skill_file.parent.mkdir(parents=True)
-    skill_file.write_text("题目文件 questions/NNN.json 的规范说明。", encoding="utf-8")
+    skill_file.write_text("试卷直写 output/paper.md 的规范说明。", encoding="utf-8")
 
     render_stub = StubRenderOnce()
     monkeypatch.setattr(agent_module, "storage", LocalStorage(tmp_path))
@@ -124,7 +126,7 @@ async def _fake_extract_intent(model: Any, **kwargs: Any) -> ExamIntent:
 
 
 # ---------------------------------------------------------------------------
-# 完整循环
+# 完整循环（生成）
 # ---------------------------------------------------------------------------
 
 
@@ -132,15 +134,15 @@ class TestRunExamAgent:
     async def test_full_loop(self, job_env: Workspace, monkeypatch: pytest.MonkeyPatch) -> None:
         ws = job_env
         job_id = ws._job_id
-        await ws.write("materials/past_paper_01.md", "往期试卷全文")
-        await ws.write("materials/keypoints.md", "重点：导数")
+        await ws.write("agent/materials/past_paper_01.md", "往期试卷全文")
+        await ws.write("agent/materials/keypoints.md", "重点：导数")
 
         fake = FakeToolModel(
             responses=[
                 AIMessage(
                     content="",
                     tool_calls=[
-                        tool_call("read_file", {"path": "materials/past_paper_01.md"}, "c1")
+                        tool_call("read_file", {"path": "agent/materials/past_paper_01.md"}, "c1")
                     ],
                 ),
                 AIMessage(
@@ -172,9 +174,9 @@ class TestRunExamAgent:
                         tool_call(
                             "edit_file",
                             {
-                                "path": "questions/001.json",
+                                "path": "output/paper.md",
                                 "old_string": "",
-                                "new_string": make_question(1),
+                                "new_string": PAPER_V1,
                             },
                             "c4",
                         )
@@ -186,43 +188,48 @@ class TestRunExamAgent:
                         tool_call(
                             "edit_file",
                             {
-                                "path": "questions/002.json",
-                                "old_string": "",
-                                "new_string": "not-json",
+                                "path": "output/paper.md",
+                                "old_string": "   D. 4\n",
+                                "new_string": "   D. 4\n\n## 二、填空题\n\n2. 1+1=______\n",
                             },
                             "c5",
                         )
                     ],
                 ),
+                AIMessage(content="", tool_calls=[tool_call("check_todo", {}, "c6")]),
                 AIMessage(
                     content="",
                     tool_calls=[
                         tool_call(
-                            "edit_file",
+                            "todo_write",
                             {
-                                "path": "questions/002.json",
-                                "old_string": "",
-                                "new_string": make_question(
-                                    2,
-                                    question_type="blank",
-                                    options=None,
-                                    stem="1+1=______",
-                                    answer="2",
-                                ),
+                                "todos": [
+                                    {
+                                        "seq": 1,
+                                        "question_type": "choice",
+                                        "knowledge_point": "导数",
+                                        "status": "completed",
+                                    },
+                                    {
+                                        "seq": 2,
+                                        "question_type": "blank",
+                                        "knowledge_point": "极限",
+                                        "status": "completed",
+                                    },
+                                ]
                             },
-                            "c6",
+                            "c6b",
                         )
                     ],
                 ),
-                AIMessage(content="", tool_calls=[tool_call("check_todo", {}, "c7")]),
-                AIMessage(content="", tool_calls=[tool_call("render_paper", {}, "c8")]),
+                AIMessage(content="", tool_calls=[tool_call("render_paper", {}, "c7")]),
                 AIMessage(
                     content="",
                     tool_calls=[
                         tool_call(
                             "AgentSummary",
                             {"total_questions": 2, "abandoned_count": 0, "summary": "两题完成"},
-                            "c9",
+                            "c8",
                         )
                     ],
                 ),
@@ -240,7 +247,6 @@ class TestRunExamAgent:
         # 结果
         assert result.completed_normally is True
         assert result.summary == "两题完成"
-        assert [q.seq for q in result.questions] == [1, 2]
         assert [t.seq for t in result.plan_items] == [1, 2]
         assert result.abandoned_seqs == []
         assert result.intent is not None and result.intent.exam_scope == "高等数学期末"
@@ -251,8 +257,7 @@ class TestRunExamAgent:
 
         # 钩子序列
         assert len(recorder.plans) == 1
-        assert [c for _q, c, _t in recorder.questions] == [1, 2]
-        assert recorder.questions[1][2] == 2  # total
+        assert recorder.progress[-1] == (2, 2)
         assert recorder.warnings == []
 
         # 结构化输出工具确实绑定给了模型
@@ -261,12 +266,14 @@ class TestRunExamAgent:
 
         # 系统提示词注入了材料清单与技能索引
         system_text = str(fake.seen_messages[0][0].content)
-        assert "materials/past_paper_01.md" in system_text
+        assert "agent/materials/past_paper_01.md" in system_text
         assert "exam-authoring" in system_text
         assert "100 分钟" in system_text
 
-        # 工作区产物
-        assert await ws.exists("questions/001.json")
+        # 工作区产物：整卷直写
+        paper = await ws.read("output/paper.md")
+        assert "## 二、填空题" in paper
+        assert "1+1=______" in paper
 
     async def test_model_crash_partial_result(
         self, job_env: Workspace, monkeypatch: pytest.MonkeyPatch
@@ -283,7 +290,6 @@ class TestRunExamAgent:
         result = await run_exam_agent(ws._job_id, {}, recorder.hooks())
 
         assert result.completed_normally is False
-        assert result.questions == []
         assert len(recorder.warnings) == 1
         assert "LLM 爆炸" in recorder.warnings[0]
         # 循环异常中断：兜底渲染仍被触发，渲染状态有值
@@ -321,15 +327,9 @@ class TestRunExamAgent:
                         tool_call(
                             "edit_file",
                             {
-                                "path": "questions/001.json",
+                                "path": "output/paper.md",
                                 "old_string": "",
-                                "new_string": make_question(
-                                    1,
-                                    question_type="blank",
-                                    options=None,
-                                    stem="1+1=______",
-                                    answer="2",
-                                ),
+                                "new_string": PAPER_V1,
                             },
                             "c2",
                         )
@@ -352,7 +352,7 @@ class TestRunExamAgent:
         result = await run_exam_agent(ws._job_id, {}, recorder.hooks())
 
         assert result.completed_normally is True
-        assert [q.seq for q in result.questions] == [1]
+        assert [t.seq for t in result.plan_items] == [1]
         # 工具未被模型调用，兜底路径补了一次渲染
         assert ws._render_calls.calls == 1
         assert result.render_status == "succeeded"
@@ -388,16 +388,10 @@ class TestRunExamAgent:
                         tool_call(
                             "edit_file",
                             {
-                                "path": "questions/001.json",
+                                "path": "output/paper.md",
                                 "old_string": "",
-                                "new_string": json.dumps(
-                                    {
-                                        "seq": 1,
-                                        "question_type": "short_answer",
-                                        "stem": "证明拉格朗日中值定理",
-                                        "answer": "略",
-                                    },
-                                    ensure_ascii=False,
+                                "new_string": (
+                                    "# 试卷\n\n## 三、简答题\n\n1. 证明拉格朗日中值定理\n"
                                 ),
                             },
                             "c2",
@@ -421,12 +415,152 @@ class TestRunExamAgent:
         result = await run_exam_agent(job_env._job_id, {}, recorder.hooks())
 
         assert result.completed_normally is True
-        assert [q.seq for q in result.questions] == [1]
         system_text = str(fake.seen_messages[0][0].content)
         assert "无材料" in system_text
         # 脚本未调 render_paper：兜底补渲染
         assert job_env._render_calls.calls == 1
         assert result.render_status == "succeeded"
+
+
+# ---------------------------------------------------------------------------
+# 修订分支
+# ---------------------------------------------------------------------------
+
+
+class TestRevisionBranch:
+    async def test_revision_loop_edits_paper(
+        self, job_env: Workspace, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """修订：提示词含试卷全文/划选/反馈/历史；全套工具；改完重渲染。"""
+        ws = job_env
+        await ws.write("output/paper.md", PAPER_V1)
+
+        fake = FakeToolModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        tool_call(
+                            "edit_file",
+                            {
+                                "path": "output/paper.md",
+                                "old_string": "1. 1+1=？",
+                                "new_string": "1. 25×4×2=？",
+                            },
+                            "r1",
+                        )
+                    ],
+                ),
+                AIMessage(content="", tool_calls=[tool_call("render_paper", {}, "r2")]),
+                AIMessage(content="已按要求修改第 1 题。"),
+            ]
+        )
+        monkeypatch.setattr(agent_module, "get_chat_model", lambda: fake)
+
+        recorder = Recorder()
+        result = await run_exam_agent(
+            ws._job_id,
+            {
+                "duration_minutes": 100,
+                "need_explanation": False,
+                "revision": {
+                    "selection": {"text": "1+1=？", "before": "## 一、选择题", "after": "A. 1"},
+                    "feedback": "这题太简单，换个难一点的",
+                    "history": [
+                        {
+                            "round_no": 1,
+                            "selection": {"text": "2+2=？", "before": "", "after": ""},
+                            "feedback": "上一轮的历史反馈",
+                            "summary": "已修改",
+                        }
+                    ],
+                },
+            },
+            recorder.hooks(),
+        )
+
+        # 修订模式：无意图提取、无结构化输出绑定，但全套 7 工具可用
+        assert result.intent is None
+        assert result.completed_normally is True
+        assert "AgentSummary" not in fake.bound_tool_names
+        for tool_name in (
+            "todo_write",
+            "check_todo",
+            "read_file",
+            "edit_file",
+            "search_knowledge",
+            "load_skill",
+            "render_paper",
+        ):
+            assert tool_name in fake.bound_tool_names
+
+        # 提示词注入：试卷全文、划选、反馈、历史
+        system_text = str(fake.seen_messages[0][0].content)
+        assert "1+1=？" in system_text  # 试卷全文
+        assert "这题太简单" in system_text  # 本次反馈
+        assert "上一轮的历史反馈" in system_text  # 会话记录
+        assert "## 一、选择题" in system_text  # 划选前文
+
+        # 试卷被修改且渲染被触发（工具路径，非兜底——修订分支无兜底）
+        paper = await ws.read("output/paper.md")
+        assert "25×4×2=？" in paper
+        assert result.render_status == "succeeded"
+        assert ws._render_calls.calls == 1
+
+    async def test_revision_without_paper_warns(
+        self, job_env: Workspace, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """试卷不存在：告警并直接返回（completed_normally=False）。"""
+        ws = job_env
+
+        class NeverModel(FakeToolModel):
+            def _generate(self, *args: Any, **kwargs: Any) -> Any:
+                raise AssertionError("不应启动修订循环")
+
+        monkeypatch.setattr(agent_module, "get_chat_model", lambda: NeverModel(responses=[]))
+        recorder = Recorder()
+        result = await run_exam_agent(
+            ws._job_id,
+            {
+                "revision": {
+                    "selection": {"text": "任意", "before": "", "after": ""},
+                    "feedback": "改一下",
+                }
+            },
+            recorder.hooks(),
+        )
+
+        assert result.completed_normally is False
+        assert len(recorder.warnings) == 1
+        assert "无法修订" in recorder.warnings[0]
+
+    async def test_revision_crash_keeps_partial(
+        self, job_env: Workspace, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """修订循环异常中断：告警收尾，不触发兜底渲染。"""
+        ws = job_env
+        await ws.write("output/paper.md", PAPER_V1)
+
+        class ExplodingModel(FakeToolModel):
+            def _generate(self, *args: Any, **kwargs: Any) -> Any:
+                raise RuntimeError("修订爆炸")
+
+        monkeypatch.setattr(agent_module, "get_chat_model", lambda: ExplodingModel(responses=[]))
+        recorder = Recorder()
+        result = await run_exam_agent(
+            ws._job_id,
+            {
+                "revision": {
+                    "selection": {"text": "1+1=？", "before": "", "after": ""},
+                    "feedback": "改一下",
+                }
+            },
+            recorder.hooks(),
+        )
+
+        assert result.completed_normally is False
+        assert ws._render_calls.calls == 0  # 修订分支无渲染兜底
+        assert "修订循环中断" in recorder.warnings[0]
 
 
 # ---------------------------------------------------------------------------
@@ -477,11 +611,28 @@ class TestPrompts:
             duration_minutes="120",
             need_explanation_label="需要解析",
             intent="{}",
-            material_list="- materials/a.md",
-            explanation_rule="每题必须携带 explanation 解析字段。",
-            max_retries="3",
+            material_list="- agent/materials/a.md",
+            explanation_rule="每题必须携带解析。",
             skill_index="- `exam-authoring`：出题规范",
         )
         assert "{{" not in rendered and "}}" not in rendered
         assert "120 分钟" in rendered
-        assert "materials/a.md" in rendered
+        assert "agent/materials/a.md" in rendered
+
+    def test_revise_prompt_renders_all_placeholders(self) -> None:
+        rendered = render_prompt(
+            load_prompt("revise_system"),
+            paper_content="# 试卷\n\n1. 题干",
+            selection_before="前文",
+            selection_text="选中的题干",
+            selection_after="后文",
+            feedback="加大难度",
+            history="- 第 1 轮：反馈",
+            material_list="- agent/materials/a.md",
+            explanation_rule="不要添加解析。",
+            skill_index="- `exam-authoring`：出题规范",
+        )
+        assert "{{" not in rendered and "}}" not in rendered
+        assert "选中的题干" in rendered
+        assert "加大难度" in rendered
+        assert "第 1 轮" in rendered

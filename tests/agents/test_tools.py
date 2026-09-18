@@ -1,8 +1,7 @@
-"""tools 模块单元测试：7 个工具工厂的行为验证。"""
+"""tools 模块单元测试：7 个工具工厂的行为验证（整卷直写版）。"""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from uuid import uuid4
 
@@ -10,7 +9,13 @@ import pytest
 
 from app.agents.schemas import TodoItem
 from app.agents.skills import SkillLoader
-from app.agents.tools import AgentContext, build_agent_tools, finalize
+from app.agents.tools import (
+    PAPER_PATH,
+    PDF_PATH,
+    AgentContext,
+    build_agent_tools,
+    finalize,
+)
 from app.agents.workspace import Workspace
 from app.core.storage import LocalStorage
 from app.retrieval.vector_store import RetrievalResult, VectorStore
@@ -19,13 +24,13 @@ from tests.agents.helpers import Recorder
 
 def make_ctx(tmp_path: Path, **overrides: object) -> AgentContext:
     store = LocalStorage(tmp_path)
-    ws = Workspace(store, prefix=f"jobs/{uuid4()}/agent")
+    ws = Workspace(store, prefix=f"jobs/{uuid4()}")
     # 技能目录也放在 tmp_path，测试不依赖仓库真实目录与 cwd
     skills_dir = tmp_path / "skills"
     skill_file = skills_dir / "exam-authoring" / "SKILL.md"
     skill_file.parent.mkdir(parents=True, exist_ok=True)
     skill_file.write_text(
-        "---\ndescription: 出题规范\n---\n\n题目文件 questions/NNN.json 的规范说明。\n",
+        "---\ndescription: 出题规范\n---\n\n试卷直写 output/paper.md 的规范说明。\n",
         encoding="utf-8",
     )
     defaults: dict = {
@@ -36,7 +41,6 @@ def make_ctx(tmp_path: Path, **overrides: object) -> AgentContext:
         "skills": SkillLoader(skills_dir),
         "vector_store": StubStore(),
         "hooks": Recorder().hooks(),
-        "max_retries": 2,
     }
     defaults.update(overrides)
     return AgentContext(**defaults)
@@ -66,16 +70,16 @@ def todo(seq: int, status: str = "pending", **kw: str) -> TodoItem:
     )
 
 
-def question_json(seq: int, **overrides: object) -> str:
-    data: dict = {
-        "seq": seq,
-        "question_type": "choice",
-        "stem": "题干",
-        "options": {"A": "1", "B": "2", "C": "3", "D": "4"},
-        "answer": "B",
-    }
-    data.update(overrides)
-    return json.dumps(data, ensure_ascii=False)
+PAPER_V1 = """# 试卷（60 分钟）
+
+## 一、选择题
+
+1. 1+1=？
+   A. 1
+   B. 2
+   C. 3
+   D. 4
+"""
 
 
 @pytest.fixture
@@ -91,13 +95,17 @@ class TestTodoWrite:
         assert len(recorder.plans) == 1
         assert "共 2 题" in result
 
-    async def test_second_call_does_not_refire(self, tmp_path: Path, recorder: Recorder) -> None:
+    async def test_progress_fired_on_every_call(
+        self, tmp_path: Path, recorder: Recorder
+    ) -> None:
+        """进度事件随 todo status 变化逐次上报（completed/total）。"""
         ctx = make_ctx(tmp_path, hooks=recorder.hooks())
         (todo_write, check_todo, *_rest) = build_agent_tools(ctx)
         await todo_write.coroutine(todos=[todo(1, status="pending")])
+        await todo_write.coroutine(todos=[todo(1, status="in_progress")])
         await todo_write.coroutine(todos=[todo(1, status="completed")])
-        assert len(recorder.plans) == 1
-        assert ctx.todos[0].status == "completed"
+        assert len(recorder.plans) == 1  # plan_ready 只发一次
+        assert recorder.progress == [(0, 1), (0, 1), (1, 1)]
         text = await check_todo.coroutine()
         assert "[x]" in text
 
@@ -127,106 +135,30 @@ class TestCheckTodo:
 class TestReadFile:
     async def test_missing_returns_error_text(self, tmp_path: Path) -> None:
         ctx = make_ctx(tmp_path)
-        tools = build_agent_tools(ctx)
-        read_file = tools[2]
-        assert "读取失败" in await read_file.coroutine(path="materials/none.md")
+        read_file = build_agent_tools(ctx)[2]
+        assert "读取失败" in await read_file.coroutine(path="agent/materials/none.md")
 
     async def test_reads_content(self, tmp_path: Path) -> None:
         ctx = make_ctx(tmp_path)
-        await ctx.workspace.write("materials/a.md", "材料内容")
+        await ctx.workspace.write("agent/materials/a.md", "材料内容")
         read_file = build_agent_tools(ctx)[2]
-        assert "材料内容" in await read_file.coroutine(path="materials/a.md")
+        assert "材料内容" in await read_file.coroutine(path="agent/materials/a.md")
 
 
-class TestEditFileQuestion:
-    async def test_valid_question_accepted(self, tmp_path: Path, recorder: Recorder) -> None:
-        ctx = make_ctx(tmp_path, hooks=recorder.hooks())
-        (todo_write, _c, _r, edit_file, *_rest) = build_agent_tools(ctx)
-        await todo_write.coroutine(todos=[todo(1), todo(2)])
-        result = await edit_file.coroutine(
-            path="questions/001.json",
-            old_string="",
-            new_string=question_json(1),
-        )
-        assert "已保存" in result and "1/2" in result
-        assert len(recorder.questions) == 1
-        assert await ctx.workspace.exists("questions/001.json")
-
-    async def test_invalid_json_counts_retry(self, tmp_path: Path, recorder: Recorder) -> None:
-        ctx = make_ctx(tmp_path, hooks=recorder.hooks())
-        edit_file = build_agent_tools(ctx)[3]
-        result = await edit_file.coroutine(
-            path="questions/001.json", old_string="", new_string="not json"
-        )
-        assert "校验失败" in result and "1/2" in result
-        assert not await ctx.workspace.exists("questions/001.json")
-        assert recorder.questions == []
-
-    async def test_max_retries_abandons(self, tmp_path: Path, recorder: Recorder) -> None:
-        ctx = make_ctx(tmp_path, hooks=recorder.hooks())
-        edit_file = build_agent_tools(ctx)[3]
-        for _ in range(2):
-            result = await edit_file.coroutine(
-                path="questions/001.json", old_string="", new_string="bad"
-            )
-        assert "已放弃" in result
-        assert ctx.abandoned_seqs == {1}
-        assert len(recorder.warnings) == 1
-
-    async def test_resubmission_washes_out_abandoned(
-        self, tmp_path: Path, recorder: Recorder
-    ) -> None:
-        ctx = make_ctx(tmp_path, hooks=recorder.hooks())
-        edit_file = build_agent_tools(ctx)[3]
-        await edit_file.coroutine(path="questions/001.json", old_string="", new_string="bad")
-        await edit_file.coroutine(path="questions/001.json", old_string="", new_string="bad")
-        result = await edit_file.coroutine(
-            path="questions/001.json", old_string="", new_string=question_json(1)
-        )
-        assert "已保存" in result
-        assert ctx.abandoned_seqs == set()
-        assert len(recorder.warnings) == 1
-        assert len(recorder.questions) == 1
-
-    async def test_need_explanation_enforced(self, tmp_path: Path, recorder: Recorder) -> None:
-        ctx = make_ctx(tmp_path, hooks=recorder.hooks(), need_explanation=True)
-        edit_file = build_agent_tools(ctx)[3]
-        result = await edit_file.coroutine(
-            path="questions/001.json", old_string="", new_string=question_json(1)
-        )
-        assert "explanation" in result
-        # 带解析后通过
-        ok = await edit_file.coroutine(
-            path="questions/001.json",
-            old_string="",
-            new_string=question_json(1, explanation="因为……"),
-        )
-        assert "已保存" in ok
-
-    async def test_seq_mismatch_with_filename(self, tmp_path: Path, recorder: Recorder) -> None:
-        """文件名 001.json 里写 seq=2：判定为校验失败，不落盘。"""
-        ctx = make_ctx(tmp_path, hooks=recorder.hooks())
-        edit_file = build_agent_tools(ctx)[3]
-        result = await edit_file.coroutine(
-            path="questions/001.json", old_string="", new_string=question_json(2)
-        )
-        assert "校验失败" in result and "不一致" in result
-        assert not await ctx.workspace.exists("questions/001.json")
-        assert recorder.questions == []
-
-    async def test_non_standard_question_name_rejected(self, tmp_path: Path) -> None:
-        """questions/ 下非 NNN.json 命名直接拒绝，不落盘。"""
+class TestEditFile:
+    async def test_create_and_replace_paper(self, tmp_path: Path) -> None:
+        """试卷直写：创建 output/paper.md 后用唯一匹配替换修改。"""
         ctx = make_ctx(tmp_path)
         edit_file = build_agent_tools(ctx)[3]
-        result = await edit_file.coroutine(
-            path="questions/1.json", old_string="", new_string=question_json(1)
+        created = await edit_file.coroutine(path=PAPER_PATH, old_string="", new_string=PAPER_V1)
+        assert "已创建" in created
+        replaced = await edit_file.coroutine(
+            path=PAPER_PATH, old_string="1. 1+1=？", new_string="1. 2+2=？"
         )
-        assert "命名非法" in result
-        assert not await ctx.workspace.exists("questions/1.json")
+        assert "已修改" in replaced
+        assert "2+2=？" in await ctx.workspace.read(PAPER_PATH)
 
-
-class TestEditFilePlain:
-    async def test_create_and_replace(self, tmp_path: Path) -> None:
+    async def test_plain_file_create_and_replace(self, tmp_path: Path) -> None:
         ctx = make_ctx(tmp_path)
         edit_file = build_agent_tools(ctx)[3]
         created = await edit_file.coroutine(path="notes/draft.md", old_string="", new_string="v1")
@@ -373,7 +305,7 @@ class TestLoadSkill:
         ctx = make_ctx(tmp_path)
         load_skill = build_agent_tools(ctx)[5]
         result = await load_skill.coroutine(name="exam-authoring")
-        assert "questions/NNN.json" in result
+        assert "output/paper.md" in result
 
     async def test_load_unknown_becomes_text(self, tmp_path: Path) -> None:
         ctx = make_ctx(tmp_path)
@@ -382,33 +314,21 @@ class TestLoadSkill:
 
 
 class TestFinalize:
-    async def test_reads_questions_and_skips_invalid(
-        self, tmp_path: Path, recorder: Recorder
-    ) -> None:
+    def test_abandoned_from_todo_marks(self, tmp_path: Path, recorder: Recorder) -> None:
+        """放弃题来自蓝图的「[已放弃]」标记，不再扫题目文件。"""
         ctx = make_ctx(tmp_path, hooks=recorder.hooks())
-        ctx.todos = [todo(1), todo(2)]
-        await ctx.workspace.write("questions/001.json", question_json(1))
-        await ctx.workspace.write("questions/002.json", "broken{")
-        result = await finalize(ctx, intent=None, summary="s", completed_normally=True)
-        assert [q.seq for q in result.questions] == [1]
-        assert len(recorder.warnings) == 1
+        ctx.todos = [todo(1), todo(2), todo(3, knowledge_point="[已放弃] 超纲")]
+        result = finalize(ctx, intent=None, summary="s", completed_normally=True)
+        assert result.abandoned_seqs == [3]
+        assert [t.seq for t in result.plan_items] == [1, 2, 3]
         assert result.completed_normally is True
-        assert [t.seq for t in result.plan_items] == [1, 2]
 
-    async def test_skips_non_standard_names(self, tmp_path: Path, recorder: Recorder) -> None:
-        """finalize 跳过不符合 questions/NNN.json 命名的文件并告警。"""
-        ctx = make_ctx(tmp_path, hooks=recorder.hooks())
-        await ctx.workspace.write("questions/extra.json", question_json(1))
-        result = await finalize(ctx, intent=None)
-        assert result.questions == []
-        assert len(recorder.warnings) == 1
-
-    async def test_carries_render_state(self, tmp_path: Path, recorder: Recorder) -> None:
+    def test_carries_render_state(self, tmp_path: Path, recorder: Recorder) -> None:
         """finalize 把 ctx 的渲染状态透传到 ExamResult。"""
         ctx = make_ctx(tmp_path, hooks=recorder.hooks())
         ctx.render_status = "md_only"
         ctx.render_error = "pandoc 退出码 1"
-        result = await finalize(ctx, intent=None)
+        result = finalize(ctx, intent=None)
         assert result.render_status == "md_only"
         assert result.render_error == "pandoc 退出码 1"
 
@@ -449,25 +369,25 @@ class TestRenderPaper:
         ctx.todos = [todo(1, status="completed"), todo(2, status="completed")]
         return ctx
 
-    async def _write_questions(self, ctx: AgentContext) -> None:
-        await ctx.workspace.write("questions/001.json", question_json(1))
-        await ctx.workspace.write("questions/002.json", question_json(2))
-
-    async def test_success_writes_md_and_pdf(self, tmp_path: Path, recorder: Recorder) -> None:
+    async def test_success_renders_pdf_and_keeps_raw_md(
+        self, tmp_path: Path, recorder: Recorder
+    ) -> None:
+        """直渲：pdf 落盘，磁盘上的 paper.md 保持 agent 原稿（不被清洗改写）。"""
         renderer = FakeRenderer([b"%PDF-1.4 fake\n"])
         ctx = self._ctx(tmp_path, recorder, renderer)
-        await self._write_questions(ctx)
+        await ctx.workspace.write(PAPER_PATH, PAPER_V1 + "残留转义：abc\\ndef\n")
         tool = build_agent_tools(ctx)[6]
 
         text = await tool.coroutine()
 
         assert "渲染成功" in text
-        assert "共 2 题" in text
         assert ctx.render_status == "succeeded"
         assert ctx.render_error is None
-        md = await ctx.storage.get(f"jobs/{ctx.job_id}/output/paper.md")
-        pdf = await ctx.storage.get(f"jobs/{ctx.job_id}/output/paper.pdf")
-        assert "题干" in md.decode("utf-8")
+        # 磁盘 md 保持原稿（含字面量转义，未回写清洗结果）
+        assert "abc\\ndef" in await ctx.workspace.read(PAPER_PATH)
+        # 喂给 pandoc 的字节经过清洗
+        assert b"abc\\\\ndef" in renderer.seen[0]
+        pdf = await ctx.storage.get(f"jobs/{ctx.job_id}/{PDF_PATH}")
         assert pdf.startswith(b"%PDF")
         assert recorder.render_starts == [True]
 
@@ -480,7 +400,7 @@ class TestRenderPaper:
             ]
         )
         ctx = self._ctx(tmp_path, recorder, renderer)
-        await self._write_questions(ctx)
+        await ctx.workspace.write(PAPER_PATH, PAPER_V1)
         tool = build_agent_tools(ctx)[6]
 
         text1 = await tool.coroutine()
@@ -489,9 +409,7 @@ class TestRenderPaper:
         assert "Undefined control sequence" in text1
         assert "latex-rendering" in text1
         assert ctx.render_status == "not_attempted"  # 仍在重试环内
-        # 失败时 md 已落盘（降级交付前提），pdf 未写
-        assert await ctx.storage.get(f"jobs/{ctx.job_id}/output/paper.md")
-        assert not ctx.storage.exists(f"jobs/{ctx.job_id}/output/paper.pdf")
+        assert not ctx.storage.exists(f"jobs/{ctx.job_id}/{PDF_PATH}")
 
         text2 = await tool.coroutine()
 
@@ -504,7 +422,7 @@ class TestRenderPaper:
     ) -> None:
         renderer = FakeRenderer([RuntimeError("exit 1")])
         ctx = self._ctx(tmp_path, recorder, renderer)
-        await self._write_questions(ctx)
+        await ctx.workspace.write(PAPER_PATH, PAPER_V1)
         tool = build_agent_tools(ctx)[6]
 
         text1 = await tool.coroutine()
@@ -514,8 +432,7 @@ class TestRenderPaper:
         assert "已放弃" in text2
         assert ctx.render_status == "md_only"
         assert "exit 1" in ctx.render_error
-        assert ctx.storage.exists(f"jobs/{ctx.job_id}/output/paper.md")
-        assert not ctx.storage.exists(f"jobs/{ctx.job_id}/output/paper.pdf")
+        assert not ctx.storage.exists(f"jobs/{ctx.job_id}/{PDF_PATH}")
         assert len(recorder.warnings) == 1
 
         # md_only 为终态：再调用不重跑渲染，直接重申放弃
@@ -529,7 +446,7 @@ class TestRenderPaper:
         """环境性错误（pandoc 缺失）：一次即降级，不进重试环。"""
         renderer = FakeRenderer([FileNotFoundError("pandoc not found")])
         ctx = self._ctx(tmp_path, recorder, renderer)
-        await self._write_questions(ctx)
+        await ctx.workspace.write(PAPER_PATH, PAPER_V1)
         tool = build_agent_tools(ctx)[6]
 
         text = await tool.coroutine()
@@ -554,8 +471,7 @@ class TestRenderPaper:
             render_max_retries=3,
             renderer_factory=broken_factory,
         )
-        ctx.todos = [todo(1, status="completed")]
-        await ctx.workspace.write("questions/001.json", question_json(1))
+        await ctx.workspace.write(PAPER_PATH, PAPER_V1)
         tool = build_agent_tools(ctx)[6]
 
         text = await tool.coroutine()
@@ -564,14 +480,17 @@ class TestRenderPaper:
         assert "apt 安装失败" in text
         assert ctx.render_status == "md_only"
 
-    async def test_no_questions_does_not_count(self, tmp_path: Path, recorder: Recorder) -> None:
+    async def test_missing_paper_does_not_render(
+        self, tmp_path: Path, recorder: Recorder
+    ) -> None:
+        """尚未创建试卷：给出可读提示，不触发渲染。"""
         renderer = FakeRenderer([b"%PDF-1.4 fake\n"])
         ctx = self._ctx(tmp_path, recorder, renderer)
         tool = build_agent_tools(ctx)[6]
 
         text = await tool.coroutine()
 
-        assert "没有任何题目文件" in text
+        assert "尚未创建试卷" in text
         assert renderer.calls == 0
         assert ctx.render_status == "not_attempted"
         assert ctx.render_attempts == 0
@@ -579,7 +498,7 @@ class TestRenderPaper:
     async def test_idempotent_after_success(self, tmp_path: Path, recorder: Recorder) -> None:
         renderer = FakeRenderer([b"%PDF-1.4 fake\n"])
         ctx = self._ctx(tmp_path, recorder, renderer)
-        await self._write_questions(ctx)
+        await ctx.workspace.write(PAPER_PATH, PAPER_V1)
         tool = build_agent_tools(ctx)[6]
         await tool.coroutine()
 
@@ -588,18 +507,28 @@ class TestRenderPaper:
         assert "无需重复渲染" in text
         assert renderer.calls == 1
 
-    async def test_orphan_question_excluded_with_warning(
-        self, tmp_path: Path, recorder: Recorder
-    ) -> None:
-        """无蓝图项的孤儿题不纳入试卷，只告警。"""
-        renderer = FakeRenderer([b"%PDF-1.4 fake\n"])
-        ctx = self._ctx(tmp_path, recorder, renderer)
-        await self._write_questions(ctx)
-        await ctx.workspace.write("questions/003.json", question_json(3))
-        tool = build_agent_tools(ctx)[6]
+    async def test_revision_context_re_renders(self, tmp_path: Path, recorder: Recorder) -> None:
+        """修订续跑是新 ctx（render_status 复位），同卷可再次渲染出新 PDF。"""
+        from app.agents.schemas import RevisionDirective, SelectionAnchor
 
-        text = await tool.coroutine()
+        renderer = FakeRenderer([b"%PDF-1.4 fake\n", b"%PDF-1.4 revised\n"])
+        ctx1 = self._ctx(tmp_path, recorder, renderer)
+        await ctx1.workspace.write(PAPER_PATH, PAPER_V1)
+        await build_agent_tools(ctx1)[6].coroutine()
+
+        ctx2 = make_ctx(
+            tmp_path,
+            hooks=recorder.hooks(),
+            duration_minutes=60,
+            renderer_factory=lambda: renderer,
+            revision=RevisionDirective(
+                selection=SelectionAnchor(text="1+1"),
+                feedback="加大难度",
+            ),
+        )
+        ctx2.workspace = ctx1.workspace
+        ctx2.storage = ctx1.storage
+        text = await build_agent_tools(ctx2)[6].coroutine()
 
         assert "渲染成功" in text
-        assert "共 2 题" in text
-        assert any("无对应蓝图项" in w for w in recorder.warnings)
+        assert renderer.calls == 2

@@ -17,7 +17,6 @@ from tests.orchestration.helpers import FakeJob, FakeSession
 EXPECTED_CONTEXT_KEYS = {
     "duration_minutes",
     "need_explanation",
-    "max_retries",
     "user_id",
     "school_id",
     "course_id",
@@ -43,7 +42,7 @@ def fakes(monkeypatch: pytest.MonkeyPatch):
         )
 
     async def fake_persist(db, job_id, result):  # noqa: ANN001
-        return {"total_questions": 0, "total_plan_items": 0, "abandoned": 0}
+        return {"total_plan_items": 0, "abandoned": 0}
 
     monkeypatch.setattr(stages_module, "_preprocess", fake_preprocess)
     monkeypatch.setattr(stages_module, "run_exam_agent", fake_run_exam_agent)

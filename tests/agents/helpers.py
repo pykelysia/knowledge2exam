@@ -9,7 +9,7 @@ from langchain_core.messages import BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
-from app.agents.schemas import AgentHooks, ExamQuestion, TodoItem
+from app.agents.schemas import AgentHooks, TodoItem
 
 
 def tool_call(name: str, args: dict[str, Any], id_: str) -> dict[str, Any]:
@@ -64,7 +64,7 @@ class Recorder:
 
     def __init__(self) -> None:
         self.plans: list[list[TodoItem]] = []
-        self.questions: list[tuple[ExamQuestion, int, int]] = []
+        self.progress: list[tuple[int, int]] = []
         self.warnings: list[str] = []
         self.render_starts: list[bool] = []
 
@@ -72,8 +72,8 @@ class Recorder:
         async def on_plan_ready(todos: list[TodoItem]) -> None:
             self.plans.append(list(todos))
 
-        async def on_question_accepted(q: ExamQuestion, completed: int, total: int) -> None:
-            self.questions.append((q, completed, total))
+        async def on_progress(completed: int, total: int) -> None:
+            self.progress.append((completed, total))
 
         async def on_warning(message: str) -> None:
             self.warnings.append(message)
@@ -83,7 +83,7 @@ class Recorder:
 
         return AgentHooks(
             on_plan_ready=on_plan_ready,
-            on_question_accepted=on_question_accepted,
+            on_progress=on_progress,
             on_warning=on_warning,
             on_render_start=on_render_start,
         )

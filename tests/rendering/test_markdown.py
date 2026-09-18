@@ -1,100 +1,37 @@
-"""markdown 合成器单元测试：TodoItem/dict reference_source 兼容与解析开关。"""
+"""markdown 清洗单元测试：sanitize_markdown 只清理游离转义，不误伤 LaTeX 命令。"""
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
-from app.agents.schemas import ExamQuestion, TodoItem
-from app.rendering.markdown import build_markdown
+from app.rendering.markdown import sanitize_markdown
 
 
-def make_question(seq: int, **overrides: object) -> ExamQuestion:
-    data: dict = {
-        "seq": seq,
-        "question_type": "choice",
-        "stem": f"第 {seq} 题题干",
-        "options": {"A": "1", "B": "2", "C": "3", "D": "4"},
-        "answer": "A",
-        "explanation": "因为所以",
-    }
-    data.update(overrides)
-    return ExamQuestion.model_validate(data)
-
-
-class TestBuildMarkdown:
-    def test_todoitem_without_reference_source(self) -> None:
-        """TodoItem 没有 reference_source 字段：注释渲染为 none，不抛错。"""
-        plan = TodoItem(seq=1, question_type="choice", knowledge_point="导数")
-        q = make_question(1)
-
-        md = build_markdown("试卷（60 分钟）", [(plan, q)], need_explanation=True)
-
-        assert 'reference_source="none"' in md
-        assert "## 一、选择题" in md
-        assert "# 试卷（60 分钟）" in md
-        assert "# 参考答案与解析" in md
-
-    def test_dict_reference_source_rendered_as_json(self) -> None:
-        """DB PlanItem 风格的 dict reference_source 渲染为 JSON 串而非 Python repr。"""
-        plan = SimpleNamespace(
-            seq=1,
-            question_type="choice",
-            knowledge_point="导数",
-            exam_direction="单调性判定",
-            difficulty="medium",
-            reference_source={"page": 3, "file": "past_paper_01.md"},
-        )
-        q = make_question(1)
-
-        md = build_markdown("试卷", [(plan, q)], need_explanation=False)
-
-        assert '{"page": 3, "file": "past_paper_01.md"}' in md
-        assert "SimpleNamespace" not in md
-
-    def test_explanation_hidden_when_disabled(self) -> None:
-        """need_explanation=False：题面与答案区都不出现解析。"""
-        plan = TodoItem(seq=1, question_type="choice", knowledge_point="导数")
-        q = make_question(1, explanation="因为所以")
-
-        md = build_markdown("试卷", [(plan, q)], need_explanation=False)
-
-        assert "因为所以" not in md
-        assert "解析：" not in md  # 「参考答案与解析」标题除外，不能断言裸词
-
-
-class TestCleanLiteralEscapes:
-    """_clean_literal_escapes 回归：只清理游离转义，不得误伤 LaTeX 命令。"""
-
+class TestSanitizeMarkdown:
     def test_latex_commands_preserved(self) -> None:
         """\\times / \\neq / \\theta 等真实数学命令不能被改写成双重转义。"""
-        plan = TodoItem(seq=1, question_type="blank", knowledge_point="三角函数")
-        q = make_question(
-            1,
-            question_type="blank",
-            options=None,
-            stem="已知 $a \\times b \\neq 0$ 且 $\\theta \\in (0, \\pi)$，则 ______",
-        )
+        md = "已知 $a \\times b \\neq 0$ 且 $\\theta \\in (0, \\pi)$，则 ______"
 
-        md = build_markdown("试卷", [(plan, q)], need_explanation=False)
+        out = sanitize_markdown(md)
 
-        assert "\\times" in md
-        assert "\\neq" in md
-        assert "\\theta" in md
-        assert "\\\\times" not in md
-        assert "\\\\neq" not in md
+        assert "\\times" in out
+        assert "\\neq" in out
+        assert "\\theta" in out
+        assert "\\\\times" not in out
+        assert "\\\\neq" not in out
 
     def test_standalone_literal_escape_still_cleaned(self) -> None:
         """游离的字面量 \\n / \\t 仍被转义（原修复目标不回退）。"""
-        plan = TodoItem(seq=1, question_type="blank", knowledge_point="格式")
-        q = make_question(
-            1,
-            question_type="blank",
-            options=None,
-            stem="转义示例一：abc\\ndef；转义示例二：x\\ty；行尾：z\\n",
-        )
+        md = "转义示例一：abc\\ndef；转义示例二：x\\ty；行尾：z\\n"
 
-        md = build_markdown("试卷", [(plan, q)], need_explanation=False)
+        out = sanitize_markdown(md)
 
-        assert "abc\\\\ndef" in md
-        assert "x\\\\ty" in md
-        assert "z\\\\n" in md
+        assert "abc\\\\ndef" in out
+        assert "x\\\\ty" in out
+        assert "z\\\\n" in out
+
+    def test_fenced_code_literal_escapes_become_real_chars(self) -> None:
+        """围栏代码块内的字面量 \\n/\\t 转为真实字符，围栏标记可被 pandoc 识别。"""
+        md = "代码：\\n```python\\nx\\n= 1\\n```\\n"
+
+        out = sanitize_markdown(md)
+
+        assert "\n```python\nx\n= 1\n```" in out
