@@ -1,8 +1,10 @@
 """Agent 层数据模型。
 
-意图（ExamIntent）、蓝图项（TodoItem）、题目（ExamQuestion）、
-最终产物（ExamResult）与事件钩子（AgentHooks）。
-agent 层通过 AgentHooks 回调上报进度，不依赖编排层。
+意图（ExamIntent）、蓝图项（TodoItem）、最终产物（ExamResult）、
+修订指令（RevisionDirective）与事件钩子（AgentHooks）。
+agent 层通过 AgentHooks 回报进度，不依赖编排层。
+
+试卷采用整卷直写：唯一产物是 output/paper.md，不存在分题的中间结构。
 """
 
 from __future__ import annotations
@@ -19,6 +21,9 @@ logger = logging.getLogger(__name__)
 QUESTION_TYPES = ("choice", "blank", "short_answer")
 DIFFICULTIES = ("easy", "medium", "hard")
 TODO_STATUSES = ("pending", "in_progress", "completed")
+
+# 修订轮终态
+ABANDONED_PREFIX = "[已放弃]"
 
 
 class ExamIntent(BaseModel):
@@ -61,54 +66,6 @@ class TodoItem(BaseModel):
         return self
 
 
-class ExamQuestion(BaseModel):
-    """一道题目的结构化内容（questions/NNN.json 的 schema）。"""
-
-    seq: int = Field(ge=1, description="题号，与蓝图一致")
-    question_type: str = Field(description=f"题型：{'/'.join(QUESTION_TYPES)}")
-    stem: str = Field(min_length=1, description="题干；填空题空位用 ______ 表示")
-    options: dict[str, str] | None = Field(default=None, description="仅选择题：A-D 四个选项内容")
-    answer: str = Field(min_length=1, description="正确答案；选择题为 A-D 其一")
-    sub_questions: list[str] | None = Field(
-        default=None, description="仅简答题：子问题列表，可省略"
-    )
-    sub_answers: list[str] | None = Field(
-        default=None, description="仅简答题：与 sub_questions 按索引一一对应"
-    )
-    explanation: str | None = Field(default=None, description="答案解析（按用户开关要求提供）")
-
-    @model_validator(mode="after")
-    def _check_shape(self) -> ExamQuestion:
-        if self.question_type not in QUESTION_TYPES:
-            raise ValueError(
-                f"question_type 必须是 {'/'.join(QUESTION_TYPES)}，实际为 {self.question_type!r}"
-            )
-
-        if self.question_type == "choice":
-            missing = [k for k in "ABCD" if not (self.options or {}).get(k)]
-            if missing:
-                raise ValueError(f"选择题 options 缺少选项：{'、'.join(missing)}")
-            extra = set(self.options or {}) - set("ABCD")
-            if extra:
-                raise ValueError(f"选择题 options 出现多余选项：{'、'.join(sorted(extra))}")
-            if self.answer not in "ABCD" or len(self.answer) != 1:
-                raise ValueError(f"选择题 answer 必须为 A/B/C/D，实际为 {self.answer!r}")
-        elif self.options:
-            raise ValueError(f"{self.question_type} 题不应携带 options")
-
-        if self.question_type != "short_answer" and (self.sub_questions or self.sub_answers):
-            raise ValueError("只有简答题可以携带 sub_questions/sub_answers")
-        if (self.sub_questions is None) != (self.sub_answers is None):
-            raise ValueError("sub_questions 与 sub_answers 必须同时提供或同时省略")
-        if self.sub_questions and self.sub_answers:
-            if len(self.sub_questions) != len(self.sub_answers):
-                raise ValueError(
-                    f"sub_questions 长度 {len(self.sub_questions)} 与 "
-                    f"sub_answers 长度 {len(self.sub_answers)} 不一致"
-                )
-        return self
-
-
 class AgentSummary(BaseModel):
     """ReAct 循环结束时的结构化总结（response_format）。"""
 
@@ -118,11 +75,14 @@ class AgentSummary(BaseModel):
 
 
 class ExamResult(BaseModel):
-    """agent 运行结束后的汇总产物，交由编排层入库。"""
+    """agent 运行结束后的汇总产物，交由编排层入库。
+
+    试卷本体是工作区的 output/paper.md（存储层交付），此处只携带
+    蓝图与运行状态，不再有分题结构。
+    """
 
     intent: ExamIntent | None = None
     plan_items: list[TodoItem] = Field(default_factory=list)
-    questions: list[ExamQuestion] = Field(default_factory=list)
     abandoned_seqs: list[int] = Field(default_factory=list)
     summary: str = ""
     completed_normally: bool = Field(
@@ -136,6 +96,36 @@ class ExamResult(BaseModel):
     )
 
 
+class SelectionAnchor(BaseModel):
+    """用户在试卷预览中划选的锚点：选中文本 + 前后文。
+
+    来自渲染后 DOM 的内容锚点（而非 md 源偏移），由 agent 语义定位。
+    """
+
+    text: str = Field(min_length=1, description="用户划选的文本")
+    before: str = Field(default="", description="选区前文（截取的少量上下文）")
+    after: str = Field(default="", description="选区后文（截取的少量上下文）")
+
+
+class RevisionRound(BaseModel):
+    """历史修订轮的摘要，作为续跑会话记录注入提示词。"""
+
+    round_no: int = Field(ge=1, description="轮次号，从 1 递增")
+    selection: SelectionAnchor | None = Field(default=None, description="当轮划选锚点")
+    feedback: str = Field(description="当轮用户反馈")
+    summary: str = Field(default="", description="当轮结果摘要")
+
+
+class RevisionDirective(BaseModel):
+    """修订指令：非 None 时 agent 以修订模式续跑（同一工具集，任务目标不同）。"""
+
+    selection: SelectionAnchor = Field(description="本轮划选的位置与内容")
+    feedback: str = Field(min_length=1, description="本轮用户修订要求")
+    history: list[RevisionRound] = Field(
+        default_factory=list, description="既往修订轮（旧→新），即本 job 的会话记录"
+    )
+
+
 @dataclass
 class AgentHooks:
     """事件钩子：编排层注入 async 回调，agent 层不依赖编排层。
@@ -144,7 +134,7 @@ class AgentHooks:
     """
 
     on_plan_ready: Callable[[list[TodoItem]], Awaitable[None]] | None = None
-    on_question_accepted: Callable[[ExamQuestion, int, int], Awaitable[None]] | None = None
+    on_progress: Callable[[int, int], Awaitable[None]] | None = None
     on_warning: Callable[[str], Awaitable[None]] | None = None
     on_render_start: Callable[[], Awaitable[None]] | None = None
 
@@ -159,8 +149,8 @@ class AgentHooks:
     async def fire_plan_ready(self, todos: list[TodoItem]) -> None:
         await self._safe(self.on_plan_ready, todos)
 
-    async def fire_question_accepted(self, q: ExamQuestion, completed: int, total: int) -> None:
-        await self._safe(self.on_question_accepted, q, completed, total)
+    async def fire_progress(self, completed: int, total: int) -> None:
+        await self._safe(self.on_progress, completed, total)
 
     async def fire_warning(self, message: str) -> None:
         await self._safe(self.on_warning, message)

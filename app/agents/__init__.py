@@ -5,8 +5,9 @@ from app.agents.schemas import (
     AgentHooks,
     AgentSummary,
     ExamIntent,
-    ExamQuestion,
     ExamResult,
+    RevisionDirective,
+    SelectionAnchor,
     TodoItem,
 )
 from app.agents.skills import SkillLoader
@@ -18,8 +19,9 @@ __all__ = [
     "AgentHooks",
     "AgentSummary",
     "ExamIntent",
-    "ExamQuestion",
     "ExamResult",
+    "RevisionDirective",
+    "SelectionAnchor",
     "SkillLoader",
     "TodoItem",
     "Workspace",
