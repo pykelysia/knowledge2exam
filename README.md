@@ -14,9 +14,10 @@
 | **资料上传** | 支持 PDF / DOCX / PPTX / Markdown / TXT / 图片（JPG、PNG、WebP、BMP）及纯文本输入（不支持 doc/ppt 旧格式） |
 | **文件预处理** | 文档解析 → 视觉 LLM OCR → 文本切块 → 向量嵌入（pgvector）；往期试卷整篇注入 agent 工作区 |
 | **意图提取** | 用户文本输入结构化为 ExamIntent（题型要求 / 重点清单 / 额外要求） |
-| **Agent 出卷** | 单个 ReAct agent 通过 7 个工具完成出卷：todo 计划管理、知识库向量检索、技能加载（出卷 / LaTeX 排版）、工作区文件读写、整卷渲染 |
-| **PDF 渲染** | Pandoc + XeLaTeX 渲染试卷（支持题目与答案解析分篇）；环境缺依赖时自动降级为仅交付 Markdown |
-| **结果检验** | 逐题 Pydantic + 业务校验，失败重试、超限放弃该题；整卷渲染失败有独立重试上限，超限降级为 `partially_completed` |
+| **Agent 出卷** | 单个 ReAct agent 通过 7 个工具完成出卷：todo 计划管理、知识库向量检索、技能加载（出卷 / LaTeX 排版）、文件读写（整卷直写 `output/paper.md`）、整卷渲染 |
+| **PDF 渲染** | Pandoc + XeLaTeX 渲染试卷（题目与答案解析分篇）；环境缺依赖时自动降级为仅交付 Markdown |
+| **结果检验** | 渲染失败错误回传 agent 自行修正（独立重试上限，超限降级为 `partially_completed`）；蓝图中的放弃题保留标记 |
+| **划选修订** | 任务完成后在整卷预览中划选任意范围提交反馈，同一 agent 携带全部历史会话直接续跑改卷，会话与快照落库可回溯 |
 | **进度推送** | SSE 实时事件流（9 种事件类型），断线按 Last-Event-ID 补发历史事件 |
 
 ---
@@ -32,18 +33,27 @@
     │                                 │
     │ 文本输入（意图提取 → ExamIntent） │ search_knowledge 向量检索
     ▼                                 ▼
-Agent 工作（单个 ReAct agent + 工具循环）
+Agent 工作（单个 ReAct agent + 工具循环，整卷直写 output/paper.md）
     │   todo_write / check_todo    出题计划与进度
     │   search_knowledge           知识库向量检索
     │   load_skill                 加载出卷 / LaTeX 排版技能
-    │   read_file / edit_file      工作区文件读写
+    │   read_file / edit_file      工作区文件读写（试卷书写工具）
     ▼ render_paper
 PDF 渲染（Pandoc + XeLaTeX，缺依赖自动降级 md_only）
     ▼
-结果检验 ──成功──▶ 结果输出（paper.md / paper.pdf）
+结果检验 ──成功──▶ 结果输出（output/paper.md / paper.pdf）
     │失败
     ▼
 回到 Agent 工作（内容错误回传修正；重试超限降级）
+
+任务完成后 ── 划选反馈修订（同一 agent 全工具续跑）
+    │   前端整卷 Markdown 预览，划选任意范围 → 所选位置下方反馈框
+    │   POST /jobs/{id}/revisions {selection, feedback}
+    ▼
+修订轮（携带划选锚点 + 反馈 + 全部历史会话）
+    │   直接修改 output/paper.md → render_paper 重渲染
+    ▼
+paper_revision 表留存会话记录与前后快照（可回溯）
 ```
 
 分层结构：
@@ -187,25 +197,27 @@ app/
 ├── api/                        # ── 接入层 ──
 │   ├── auth.py                 # 注册 / 登录 / 刷新 / 登出（Cookie 双 JWT）
 │   ├── uploads.py              # 资料上传（文件 / 文本）与删除
-│   ├── jobs.py                 # 任务创建 / 详情 / SSE 进度流 / 题目 / 取消 / 删除
-│   ├── artifacts.py            # paper.md / paper.pdf 下载
+│   ├── jobs.py                 # 任务创建 / 详情 / SSE 进度流 / 取消 / 删除
+│   ├── revisions.py            # 划选反馈修订提交与会话历史
+│   ├── artifacts.py            # paper.md（含进行中预览）/ paper.pdf 下载
 │   └── catalog.py              # 学校 / 课程列表
 │
 ├── orchestration/              # ── 编排层 ──
 │   ├── state_machine.py        # 任务状态与流转合法性校验
 │   ├── stages.py               # 管线主体：预处理 → agent → 入库 → 终态
-│   ├── integration.py          # ExamResult（蓝图 + 题目）批量入库
+│   ├── revision.py             # 修订编排：轮次创建、后台续跑、快照比对
+│   ├── integration.py          # ExamResult（蓝图）批量入库
 │   └── events.py               # 兼容 re-export（EventBus 本体在 core/events.py）
 │
 ├── agents/                     # ── Agent 层（单个 ReAct agent）──
-│   ├── agent.py                # 入口 run_exam_agent：意图 → 组装 → 循环 → 兜底渲染
+│   ├── agent.py                # 入口 run_exam_agent：生成 / 修订双分支
 │   ├── intent.py               # 用户文本 → ExamIntent 意图提取
 │   ├── tools.py                # 7 个工具（todo / 检索 / 技能 / 文件 / 渲染）
 │   ├── skills.py               # SKILL.md 技能加载器
 │   ├── workspace.py            # 对象存储上的受控工作区文件面
-│   ├── schemas.py              # ExamIntent / ExamQuestion / ExamResult 等契约
+│   ├── schemas.py              # ExamIntent / RevisionDirective / ExamResult 等契约
 │   ├── llm.py                  # ChatOpenAI 工厂
-│   └── prompts/                # 提示词模板（system.md / intent.md）
+│   └── prompts/                # 提示词模板（system / revise_system / intent）
 │
 ├── ingestion/                  # ── 能力层：入 ──
 │   ├── parsers/                # 格式解析器（pdf / docx / pptx / image / text）
@@ -220,7 +232,7 @@ app/
 │   └── past_papers.py          # 往期试卷处理
 │
 ├── rendering/                  # ── 能力层：产出 ──
-│   ├── markdown.py             # 试卷 Markdown 合成
+│   ├── markdown.py             # 渲染前清洗（sanitize_markdown）
 │   ├── renderer.py             # Pandoc + XeLaTeX 渲染（缺依赖降级）
 │   └── setup.py                # 渲染依赖自动安装
 │
@@ -229,9 +241,9 @@ app/
 │
 ├── models/                     # SQLAlchemy ORM（user / auth / catalog / upload /
 │                               # resource / chunk / job / plan / question /
-│                               # moderation / llm_call）
+│                               # revision / moderation / llm_call）
 ├── schemas/                    # Pydantic 请求 / 响应模型（auth / upload / job /
-│                               # question / catalog / common）
+│                               # revision / catalog / common）
 ├── core/                       # 基础设施（db / security / storage / events /
 │                               # exceptions / deps / enums / seed / debug_log /
 │                               # task_registry）
@@ -255,8 +267,9 @@ docs/                           # 文档目录
 |------|------|------|
 | 认证 | `/api/v1/auth` | 注册 / 登录 / 刷新 / 登出（httpOnly Cookie 双 JWT） |
 | 上传 | `/api/v1/uploads` | 文件（multipart）或文本（JSON）上传；删除 |
-| 任务 | `/api/v1/jobs` | 列表 / 创建 / 详情 / SSE 进度流 / 题目列表 / 取消 / 删除 |
-| 产物 | `/api/v1/jobs/{id}/paper.md`、`/paper.pdf` | 试卷产物下载 |
+| 任务 | `/api/v1/jobs` | 列表 / 创建 / 详情 / SSE 进度流 / 取消 / 删除 |
+| 产物 | `/api/v1/jobs/{id}/paper.md`、`/paper.pdf` | 试卷产物（md 支持任务进行中渐进预览） |
+| 修订 | `/api/v1/jobs/{id}/revisions` | 划选反馈修订（POST 提交 / GET 会话历史） |
 | 学校/课程 | `/api/v1/schools` | 学校列表 / 课程列表（可选：同校同课程共享知识库） |
 
 创建任务（`POST /api/v1/jobs`）参数：
@@ -270,7 +283,7 @@ docs/                           # 文档目录
 
 **SSE 事件类型**（`GET /api/v1/jobs/{id}/events`）：
 
-`stage_changed` / `plan_ready` / `question_completed` / `question_retried` / `question_replanned` / `question_abandoned` / `warning` / `error` / `done`
+`stage_changed` / `plan_ready` / `progress` / `warning` / `error` / `revision_started` / `revision_done` / `revision_failed` / `done`
 
 事件持久化在 `job_stage` 表并带单调递增 `seq`；断线重连时服务端按 `Last-Event-ID` 补发历史事件。
 
@@ -294,10 +307,22 @@ pending → preprocessing → generating → rendering → completed
 
 行为要点：
 
-- `generating` 覆盖 agent 工作全程：蓝图规划（todo）、逐题产出与校验、结果检验均在其中完成
+- `generating` 覆盖 agent 工作全程：蓝图规划（todo）、整卷直写 output/paper.md 均在其中完成
 - 管线意外异常时任务定格 `failed`（`error_code=PIPELINE_FAILED`），并推送 `error` + `done` 事件
 - PDF 渲染失败不导致 `failed`：重试超限后任务以 `partially_completed` 结束，仅交付 paper.md，并携带 `RENDER_FAILED` warning
-- 单题校验连续失败超过 `AGENT_MAX_RETRIES` 次即放弃该题（`question_abandoned` 事件），任务继续，不影响其余题目
+- 某题实在无法产出时 agent 在蓝图中以「[已放弃] <原因>」标记该题并继续，不影响其余题目
+
+### 划选反馈修订
+
+任务进入 `completed` / `partially_completed` 后，可在前端整卷预览中划选任意范围，
+在所选位置下方的反馈框中撰写要求并提交：
+
+- 后端把「划选锚点（选中文本 + 前后文）+ 反馈 + 全部历史轮次」交回**同一个 agent**
+  （全套 7 工具、零裁剪）续跑，直接修改 `output/paper.md` 并重渲染 PDF——不是重新出题；
+- 每轮落一行 `paper_revision`（会话记录），留存修订前后的试卷全文快照，可回溯；
+- 同一任务同时只允许一轮修订在跑（409 `REVISION_IN_PROGRESS`）；
+- 修订不改变任务状态；进度经 `revision_started` / `revision_done` / `revision_failed` 事件推送，
+  前端在修订期间以轮询兜底。
 
 ---
 
@@ -306,8 +331,8 @@ pending → preprocessing → generating → rendering → completed
 前端项目位于 `frontend/` 目录：
 
 - **技术栈**：React 19 + TypeScript + Vite 8 + Tailwind CSS 4 + react-router 7 + axios，自研轻量 UI 组件，oxlint 检查
-- **页面**：Dashboard（创建任务）/ Jobs（任务历史）/ JobDetail（SSE 实时进度 + 产物下载）/ Login / Register
-- **SSE 消费**：原生 `EventSource` 订阅任务事件流，断线由浏览器自动重连（携带 Last-Event-ID），异常时降级为轮询任务详情
+- **页面**：Dashboard（创建任务）/ Jobs（任务历史）/ JobDetail（SSE 实时进度 + 整卷 Markdown 预览 + 划选修订 + 修订历史）/ Login / Register
+- **SSE 消费**：原生 `EventSource` 订阅任务事件流，断线由浏览器自动重连（携带 Last-Event-ID），异常时降级为轮询任务详情；修订进行中轮询会话状态兜底
 
 ```bash
 cd frontend
