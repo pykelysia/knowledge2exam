@@ -26,6 +26,9 @@ class ErrorCode(StrEnum):
     UPLOAD_IN_USE = "UPLOAD_IN_USE"
     JOB_NOT_READY = "JOB_NOT_READY"
     JOB_ALREADY_FINISHED = "JOB_ALREADY_FINISHED"
+    JOB_NOT_FINISHED = "JOB_NOT_FINISHED"
+    REVISION_IN_PROGRESS = "REVISION_IN_PROGRESS"
+    PAPER_NOT_READY = "PAPER_NOT_READY"
     # 生成过程（无 HTTP 状态，作为 warning / error 事件）
     PARSE_FAILED = "PARSE_FAILED"
     OCR_DEGRADED = "OCR_DEGRADED"
@@ -63,6 +66,9 @@ _ERROR_CODE_HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.UPLOAD_IN_USE: 409,
     ErrorCode.JOB_NOT_READY: 409,
     ErrorCode.JOB_ALREADY_FINISHED: 409,
+    ErrorCode.JOB_NOT_FINISHED: 409,
+    ErrorCode.REVISION_IN_PROGRESS: 409,
+    ErrorCode.PAPER_NOT_READY: 409,
     ErrorCode.RENDER_FAILED: 409,
     ErrorCode.MODEL_UNAVAILABLE: 503,
     ErrorCode.RATE_LIMITED: 429,
@@ -164,6 +170,21 @@ class JobNotReady(AppException):
 class JobAlreadyFinished(AppException):
     def __init__(self) -> None:
         super().__init__(ErrorCode.JOB_ALREADY_FINISHED, "任务已终结，不可取消")
+
+
+class JobNotFinished(AppException):
+    def __init__(self, message: str | None = None) -> None:
+        super().__init__(ErrorCode.JOB_NOT_FINISHED, message or "任务尚未完成，不可修订")
+
+
+class RevisionInProgress(AppException):
+    def __init__(self) -> None:
+        super().__init__(ErrorCode.REVISION_IN_PROGRESS, "已有修订正在进行，请等待完成后再提交")
+
+
+class PaperNotReady(AppException):
+    def __init__(self) -> None:
+        super().__init__(ErrorCode.PAPER_NOT_READY, "试卷尚未生成，无法修订")
 
 
 class RenderFailed(AppException):
