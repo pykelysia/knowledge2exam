@@ -126,6 +126,23 @@ class TestScannedDocFlow:
         assert result.page_renders is not None
         assert result.page_renders[0].data[:8] == b"\x89PNG\r\n\x1a\n"
 
+    async def test_off_mode_scanned_keeps_embedded_images(self, monkeypatch) -> None:
+        """off 模式（回归）：页级 OCR 关闭时扫描页保留内嵌图片走逐图识别。
+
+        旧行为是图片仍提取并 OCR；类型路由后曾退化为静默空文档。
+        """
+        monkeypatch.setattr(settings, "pdf_ocr_mode", "off")
+
+        result = await PyMuPDFParser().parse_async("scan.pdf", _make_scan_pdf(pages=2))
+
+        assert result.pdf_type == "scanned"
+        assert result.page_renders is None
+        assert result.images is not None
+        assert len(result.images) == 2
+        # 占位符进正文，逐图 OCR 后按占位符回填
+        assert "[图: p1-1]" in result.text
+        assert "[图: p2-2]" in result.text
+
 
 class TestConvertedToPdfParser:
     async def test_image_wrapped_into_single_page_pdf(self, force_ocr_mode) -> None:

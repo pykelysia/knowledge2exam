@@ -284,6 +284,21 @@ class TestRunOcrKindRouting:
         chart = ImageInfo(page=1, data=b"chart", kind="chart")
         image = ImageInfo(page=2, data=b"image")
         _run_ocr([chart, image])
-        assert spy.calls == ["chart", "text"]
+        # 并发执行，调用顺序不保证，只验证提示词按 kind 分流
+        assert sorted(spy.calls) == ["chart", "text"]
         assert chart.ocr_text == "C"
         assert image.ocr_text == "T"
+
+    def test_single_failure_does_not_affect_others(self, monkeypatch) -> None:
+        class _FlakyOCR:
+            async def extract_text(self, image_bytes: bytes) -> str:
+                if image_bytes == b"bad":
+                    raise RuntimeError("boom")
+                return "ok"
+
+        monkeypatch.setattr(VisionLLMOCR, "from_settings", classmethod(lambda cls: _FlakyOCR()))
+        bad = ImageInfo(page=1, data=b"bad")
+        good = ImageInfo(page=2, data=b"good")
+        _run_ocr([bad, good])
+        assert bad.skipped_reason is not None and bad.skipped_reason.startswith("ocr_failed")
+        assert good.ocr_text == "ok"

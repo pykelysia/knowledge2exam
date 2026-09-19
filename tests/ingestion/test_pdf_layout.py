@@ -133,6 +133,16 @@ class TestSkipEmbeddedImages:
         stats = _stats(1, reason="no_text", coverage=0.9)
         assert skip_embedded_images(stats) is True
 
+    def test_scanned_page_kept_when_keep_scanned_pages(self) -> None:
+        # 页级 OCR 关闭（off 模式）时保留扫描页图片，退回逐图识别
+        stats = _stats(1, reason="no_text", coverage=0.9)
+        assert skip_embedded_images(stats, keep_scanned_pages=True) is False
+
+    def test_hidden_text_layer_page_skipped_even_when_keep(self) -> None:
+        # 隐藏文本层去重规则与 OCR 开关无关：文本层已承载内容，图片仍跳过
+        stats = _stats(1, chars=800, coverage=0.9)
+        assert skip_embedded_images(stats, keep_scanned_pages=True) is True
+
     def test_hidden_text_layer_page_skipped(self) -> None:
         stats = _stats(1, chars=800, coverage=0.9)
         assert skip_embedded_images(stats) is True
@@ -168,6 +178,18 @@ class TestEnhanceScanImage:
 
     def test_invalid_input_returns_original(self) -> None:
         assert enhance_scan_image(b"not a png") == b"not a png"
+
+
+def _make_framed_text_pdf() -> bytes:
+    """整页装饰边框 + 两段正文（回归夹具：边框不得被误判为图表区吞掉正文）。"""
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.draw_rect(pymupdf.Rect(50, 50, 545, 792))
+    page.insert_text((100, 300), "important body paragraph " * 5, fontsize=11)
+    page.insert_text((100, 350), "second paragraph " * 5, fontsize=11)
+    data = doc.tobytes()
+    doc.close()
+    return data
 
 
 class TestParserRouting:
@@ -228,6 +250,17 @@ class TestParserRouting:
         result = await PyMuPDFParser().parse_async("mixed.pdf", _make_mixed_pdf())
         assert result.page_renders is None
 
+    async def test_decorative_frame_not_treated_as_chart(self, monkeypatch) -> None:
+        """整页边框内文字密集 → 不是图表区；正文完整保留。"""
+        monkeypatch.setattr(settings, "pdf_ocr_mode", "auto")
+
+        result = await PyMuPDFParser().parse_async("framed.pdf", _make_framed_text_pdf())
+
+        assert result.images is None  # 无图片也无误判的图表区
+        assert "important body paragraph" in result.text
+        assert "second paragraph" in result.text
+        assert "图表" not in result.text
+
 
 class TestCollectPageContents:
     async def test_structure_preserved_on_text_pdf(self, monkeypatch) -> None:
@@ -254,6 +287,22 @@ class TestCollectPageContents:
 
         result = await PyMuPDFParser().parse_async("a.pdf", data)
         assert "# Section Title" in result.text
+        # TOC 条目必须命中文本块，不能页首插一条 + 原文再来一条
+        assert result.text.count("Section Title") == 1
+
+    async def test_toc_midpage_heading_not_duplicated(self, monkeypatch) -> None:
+        """合成 TOC 的目标点指向页顶：靠标题文本匹配命中页中标题，不重复。"""
+        doc = pymupdf.open()
+        page = doc.new_page()
+        page.insert_text((72, 200), "Mid Page Heading", fontsize=11)
+        page.insert_text((72, 300), "body text " * 10, fontsize=11)
+        doc.set_toc([[1, "Mid Page Heading", 1]])
+        data = doc.tobytes()
+        doc.close()
+
+        result = await PyMuPDFParser().parse_async("a.pdf", data)
+        assert result.text.count("Mid Page Heading") == 1
+        assert "# Mid Page Heading" in result.text
 
     async def test_collect_stats_single_pass(self, monkeypatch) -> None:
         doc = pymupdf.open(stream=_make_mixed_pdf(), filetype="pdf")
