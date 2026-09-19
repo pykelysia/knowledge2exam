@@ -58,7 +58,7 @@ class EmbeddingClient:
         # 按输入顺序返回向量
         vectors = [item.embedding for item in response.data]
 
-        log_step(
+        await log_step(
             job_id="",
             name="embedding.embed",
             stage="preprocessing",

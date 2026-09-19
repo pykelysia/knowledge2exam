@@ -26,6 +26,27 @@ async def log_step(
     stage: str | None = None,
 ) -> None:
     """记录一个 debug 步骤（仅 DEBUG_MODE=true 时写入）。"""
+    log_step_sync(
+        job_id=job_id,
+        name=name,
+        step=step,
+        input=input,
+        output=output,
+        elapsed_ms=elapsed_ms,
+        stage=stage,
+    )
+
+
+def log_step_sync(
+    job_id: str,
+    name: str,
+    step: str = "function",
+    input: dict[str, Any] | None = None,
+    output: dict[str, Any] | None = None,
+    elapsed_ms: float = 0,
+    stage: str | None = None,
+) -> None:
+    """`log_step` 的同步版本，供同步代码调用（Chunker 等无事件循环上下文）。"""
     if not settings.debug_mode:
         return
 

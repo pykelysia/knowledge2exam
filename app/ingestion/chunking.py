@@ -6,7 +6,7 @@ import re
 import uuid
 from dataclasses import dataclass
 
-from app.core.debug_log import log_step
+from app.core.debug_log import log_step_sync
 from app.core.enums import SourceType
 
 # PDF 页标记（与 postprocess.replace_page_text 保持同一格式约定）
@@ -63,7 +63,7 @@ class Chunker:
             chunks = self._chunk_by_size(text, page, source_type)
 
         if chunks:
-            log_step(
+            log_step_sync(
                 job_id="",
                 name="chunker.chunk",
                 stage="preprocessing",
