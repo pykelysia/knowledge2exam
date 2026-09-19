@@ -40,26 +40,27 @@ class PyMuPDFParser(Parser):
     def parse(self, filename: str, data: bytes) -> ParseResult:
         doc = pymupdf.open(stream=data, filetype="pdf")
         try:
-            contents = collect_page_contents(doc)
-            pdf_type = classify_document([content.stats for content in contents])
-            headings = build_heading_map(doc, contents)
-
             mode = getattr(settings, "pdf_ocr_mode", "auto")
             dpi = getattr(settings, "ocr_dpi", 200)
             max_ocr_pages = getattr(settings, "ocr_max_pages", 60)
             enhance = getattr(settings, "pdf_scan_enhance", True)
+            # 页级 OCR 关闭时保留扫描页内嵌图片，退回逐图识别，避免空文档
+            keep_scanned_pages = mode == "off"
+
+            contents = collect_page_contents(doc, keep_scanned_pages=keep_scanned_pages)
+            pdf_type = classify_document([content.stats for content in contents])
+            headings = build_heading_map(doc, contents)
 
             text_parts: list[str] = []
             images: list[ImageInfo] = []
             page_renders: list[PageRender] = []
             renders_truncated = False
-            image_seq = 0
-            chart_seq = 0
+            marker_seq = 0
 
             for content in contents:
                 page = doc[content.stats.page - 1]
-                body, page_images, image_seq, chart_seq = self._assemble_page(
-                    page, content, headings, image_seq, chart_seq
+                body, page_images, marker_seq = self._assemble_page(
+                    page, content, headings, marker_seq, keep_scanned_pages
                 )
                 images.extend(page_images)
                 text_parts.append(f"--- Page {content.stats.page} ---\n{body}")
@@ -104,23 +105,24 @@ class PyMuPDFParser(Parser):
         page: pymupdf.Page,
         content: PageContent,
         headings: HeadingMap,
-        image_seq: int,
-        chart_seq: int,
-    ) -> tuple[str, list[ImageInfo], int, int]:
+        marker_seq: int,
+        keep_scanned_pages: bool,
+    ) -> tuple[str, list[ImageInfo], int]:
         """把单页各区域按阅读顺序（y0, x0）组装为 Markdown 正文。
 
-        返回 (正文, 图片/图表信息列表, 更新后的图片序号, 更新后的图表序号)。
+        返回 (正文, 图片/图表信息列表, 更新后的占位符序号)。
         """
         page_no = content.stats.page
         items: list[tuple[float, float, str]] = []
-        covered_regions = [t.bbox for t in content.tables] + [c.bbox for c in content.charts]
+        # 仅表格区覆盖的文本块从正文剔除（单元格文字由表格 Markdown 承载）；
+        # 图表区不剔除——图表是正文的增强而非替代，坐标轴标签宁可轻量重复
+        covered_regions = [t.bbox for t in content.tables]
 
-        # 文本区：被表格/图表覆盖的块剔除（内容由表格 Markdown / 图表转录承载）
         for block in content.blocks:
             if is_region_covered(block.bbox, covered_regions):
                 continue
             text = block.text
-            level = headings.level_for(page_no, block.bbox[1])
+            level = headings.level_for(page_no, block.bbox[1], block.text)
             if level:
                 text = f"{'#' * level} {text}"
             items.append((block.bbox[1], block.bbox[0], text))
@@ -134,18 +136,19 @@ class PyMuPDFParser(Parser):
         for table in content.tables:
             items.append((table.bbox[1], table.bbox[0], table.markdown))
 
-        # 图片区 / 图表区：登记占位符，OCR 文本由编排层回填
+        # 图片区 / 图表区：登记占位符，OCR 文本由编排层回填。
+        # 图片与图表共用一个全局递增序号，保证 marker 与 order 不重复
         page_images: list[ImageInfo] = []
-        if not skip_embedded_images(content.stats):
+        if not skip_embedded_images(content.stats, keep_scanned_pages=keep_scanned_pages):
             for ref in content.images:
-                image_seq += 1
-                marker = f"[图: p{page_no}-{image_seq}]"
+                marker_seq += 1
+                marker = f"[图: p{page_no}-{marker_seq}]"
                 page_images.append(
                     ImageInfo(
                         page=page_no,
                         data=ref.data,
                         bbox=ref.bbox,
-                        order=image_seq,
+                        order=marker_seq,
                         marker=marker,
                     )
                 )
@@ -154,14 +157,14 @@ class PyMuPDFParser(Parser):
                 png = self._render_region_png(page, ref.bbox)
                 if png is None:
                     continue
-                chart_seq += 1
-                marker = f"[图表: p{page_no}-{chart_seq}]"
+                marker_seq += 1
+                marker = f"[图表: p{page_no}-{marker_seq}]"
                 page_images.append(
                     ImageInfo(
                         page=page_no,
                         data=png,
                         bbox=ref.bbox,
-                        order=image_seq + chart_seq,
+                        order=marker_seq,
                         kind="chart",
                         marker=marker,
                     )
@@ -170,7 +173,7 @@ class PyMuPDFParser(Parser):
 
         items.sort(key=lambda item: (item[0], item[1]))
         body = "\n\n".join(text for _, _, text in items if text.strip())
-        return body, page_images, image_seq, chart_seq
+        return body, page_images, marker_seq
 
     # ---- 渲染与路由 ----
 
