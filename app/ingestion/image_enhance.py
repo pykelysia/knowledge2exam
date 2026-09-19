@@ -19,7 +19,8 @@ def enhance_scan_image(png: bytes) -> bytes:
             gray = ImageOps.autocontrast(gray, cutoff=1)
             gray = gray.filter(ImageFilter.UnsharpMask(radius=1, percent=80, threshold=2))
             out = io.BytesIO()
-            gray.convert("RGB").save(out, format="PNG")
+            # 保持灰度单通道存储：PNG 原生支持，体积约为 RGB 的 1/3
+            gray.save(out, format="PNG")
             return out.getvalue()
     except Exception:
         return png
