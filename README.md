@@ -236,12 +236,8 @@ app/
 │   ├── renderer.py             # Pandoc + XeLaTeX 渲染（缺依赖降级）
 │   └── setup.py                # 渲染依赖自动安装
 │
-├── moderation/                 # ── 能力层：安全 ──
-│   └── moderator.py            # 内容安全检测（当前管线未接入）
-│
 ├── models/                     # SQLAlchemy ORM（user / auth / catalog / upload /
-│                               # resource / chunk / job / plan / question /
-│                               # revision / moderation / llm_call）
+│                               # resource / chunk / job / plan / revision）
 ├── schemas/                    # Pydantic 请求 / 响应模型（auth / upload / job /
 │                               # revision / catalog / common）
 ├── core/                       # 基础设施（db / security / storage / events /
@@ -375,7 +371,7 @@ uv run alembic downgrade -1
 ### 清空数据表
 
 ```bash
-# 清空任务相关表（job / job_stage / job_upload / plan_item / llm_call 等）
+# 清空任务相关表（job / job_stage / job_upload / plan_item）
 ./scripts/clear_db.sh tasks
 
 # 清空全部业务表（保留 alembic_version）
