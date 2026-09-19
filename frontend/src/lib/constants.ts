@@ -63,7 +63,6 @@ export const ERROR_MESSAGES: Record<string, string> = {
   REVISION_IN_PROGRESS: '已有修订正在进行，请等待完成后再提交',
   PAPER_NOT_READY: '试卷尚未生成，无法修订',
   PARSE_FAILED: '资料解析失败，对应内容将被跳过',
-  MODERATION_REJECTED: '内容安全审核未通过',
   MODEL_UNAVAILABLE: '模型服务不可用，请稍后重试',
   RATE_LIMITED: '请求过于频繁，请稍后重试',
   USER_EXISTS: '邮箱或用户名已被注册',

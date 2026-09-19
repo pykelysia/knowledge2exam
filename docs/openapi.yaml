@@ -882,7 +882,6 @@ components:
         - PAPER_NOT_READY
         - PARSE_FAILED
         - OCR_DEGRADED
-        - MODERATION_REJECTED
         - PLANNING_FAILED
         - GENERATION_EXHAUSTED
         - RENDER_FAILED
