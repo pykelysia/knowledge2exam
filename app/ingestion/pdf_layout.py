@@ -12,6 +12,7 @@ classify_document 是纯函数便于单测；collect_page_contents 单遍收集�
 from __future__ import annotations
 
 import logging
+import re
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -35,6 +36,8 @@ _SCANNED_DOC_RATIO = 0.9
 _MIN_TEXT_CHARS = 32
 # 矢量图簇面积占页面比例下限（低于视为装饰线框）
 _CHART_MIN_AREA_RATIO = 0.04
+# 簇内文字字符数上限：超过视为边框/加框文本而非图表（图表簇内只有轴标签等短文本）
+_CHART_MAX_TEXT_CHARS = 100
 # 文本块被表格/图表区域覆盖的比例达到此值时从正文剔除
 # （其内容由表格 Markdown / 图表转录承载，避免重复）
 _REGION_COVER_RATIO = 0.6
@@ -143,14 +146,15 @@ def is_region_covered(bbox: tuple[float, float, float, float],
     return any(overlap_ratio(bbox, region) >= _REGION_COVER_RATIO for region in regions)
 
 
-def skip_embedded_images(stats: PageStats) -> bool:
+def skip_embedded_images(stats: PageStats, *, keep_scanned_pages: bool = False) -> bool:
     """是否跳过该页内嵌图片提取（避免与整页内容重复）。
 
-    - 扫描页：内容由整页渲染 + OCR 承载；
+    - 扫描页：内容由整页渲染 + OCR 承载；keep_scanned_pages=True（页级
+      OCR 关闭）时保留图片，退回逐图识别的链路，避免产出空文档；
     - 健康页 + 整页大图 + 足量文本：典型"扫描后带隐藏文本层"，文本层即权威内容。
     """
     if stats.is_scanned:
-        return True
+        return not keep_scanned_pages
     return (
         stats.healthy
         and stats.image_coverage >= _FULL_PAGE_IMAGE_COVERAGE
@@ -176,8 +180,14 @@ def classify_document(pages: Sequence[PageStats]) -> PdfType:
     return PdfType.PURE_TEXT
 
 
-def collect_page_contents(doc) -> list[PageContent]:
-    """单遍收集每页版面内容：文本块、表格、图片、矢量图表簇。"""
+def collect_page_contents(
+    doc, *, keep_scanned_pages: bool = False
+) -> list[PageContent]:
+    """单遍收集每页版面内容：文本块、表格、图片、矢量图表簇。
+
+    keep_scanned_pages=True 时扫描页的内嵌图片也保留（页级 OCR 关闭的
+    退路，由编排层逐图识别）。
+    """
     contents: list[PageContent] = []
     for page_num in range(len(doc)):
         page = doc[page_num]
@@ -203,7 +213,7 @@ def collect_page_contents(doc) -> list[PageContent]:
                 image_datas.append(obj.get("image"))
 
         tables = _collect_tables(page)
-        charts = _collect_charts(page, tables, image_bboxes)
+        charts = _collect_charts(page, tables, image_bboxes, blocks)
 
         page_area = abs(page.rect) if page.rect else 0.0
         coverage = _image_coverage(image_bboxes, page_area)
@@ -220,7 +230,7 @@ def collect_page_contents(doc) -> list[PageContent]:
 
         # 无有效文本层的扫描页 / 带隐藏文本层的整页大图：跳过内嵌图片提取
         images: list[ImageRef] = []
-        if not skip_embedded_images(stats):
+        if not skip_embedded_images(stats, keep_scanned_pages=keep_scanned_pages):
             for bbox, data in zip(image_bboxes, image_datas, strict=True):
                 if data:
                     images.append(ImageRef(bbox=bbox, data=data))
@@ -255,16 +265,30 @@ class HeadingMap:
     def __init__(self, entries: list[_HeadingEntry]) -> None:
         self._entries = entries
 
-    def level_for(self, page: int, y0: float) -> int | None:
-        """返回 (page, y0) 处文本块的标题层级；非标题返回 None。"""
+    def level_for(self, page: int, y0: float, text: str) -> int | None:
+        """返回文本块的标题层级；非标题返回 None。
+
+        匹配顺序：目标坐标邻近（真实 PDF 的 TOC 目标点可靠）→ 标题文本
+        包含（合成/简化 TOC 的目标点缺失或指向页顶时）。
+        """
         for entry in self._entries:
             if (
                 entry.page == page
+                and not entry.matched
                 and entry.y is not None
                 and abs(entry.y - y0) <= _TOC_MATCH_TOLERANCE
             ):
                 entry.matched = True
                 return entry.level
+
+        normalized = _normalize_title(text)
+        if normalized:
+            for entry in self._entries:
+                if entry.page == page and not entry.matched:
+                    title = _normalize_title(entry.title)
+                    if title and title in normalized:
+                        entry.matched = True
+                        return entry.level
         return None
 
     def take_pending(self, page: int) -> list[tuple[float | None, int, str]]:
@@ -278,6 +302,11 @@ class HeadingMap:
             if entry.page == page:
                 entry.matched = True
         return pending
+
+
+def _normalize_title(text: str) -> str:
+    """标题归一化：去除全部空白，供 TOC 标题与文本块的包含比较。"""
+    return re.sub(r"\s+", "", text)
 
 
 def build_heading_map(doc, contents: Sequence[PageContent]) -> HeadingMap:
@@ -306,8 +335,17 @@ def _toc_entry(item, *, page_count: int) -> _HeadingEntry | None:
         to = dest.get("to") if isinstance(dest, dict) else None
         y = float(to.y) if to is not None and hasattr(to, "y") else None
     elif isinstance(item, (list, tuple)) and len(item) >= 3:
+        # get_toc(simple=False) 的条目形如 [lvl, title, page, dest]，
+        # dest 是 {"kind":…, "to": Point(x, y)}，目标点在 item[3]
         level, title, page = item[0], str(item[1]), item[2]
         y = None
+        if len(item) >= 4 and isinstance(item[3], dict):
+            to = item[3].get("to")
+            if to is not None and hasattr(to, "y"):
+                try:
+                    y = float(to.y)
+                except (TypeError, ValueError):
+                    y = None
     else:
         return None
     if not isinstance(page, int) or not (1 <= page <= page_count):
@@ -435,9 +473,17 @@ def _collect_tables(page) -> list[TableInfo]:
     return tables
 
 
-def _collect_charts(page, tables: list[TableInfo],
-                    image_bboxes: Sequence[tuple[float, float, float, float]]) -> list[ChartRef]:
-    """矢量绘图聚类出图表候选区，剔除表格线框、位图区域与过小簇。"""
+def _collect_charts(
+    page,
+    tables: list[TableInfo],
+    image_bboxes: Sequence[tuple[float, float, float, float]],
+    blocks: Sequence[TextBlock],
+) -> list[ChartRef]:
+    """矢量绘图聚类出图表候选区。
+
+    剔除：面积过小的簇、与表格/位图重叠的簇、以及文字密集的簇
+    （整页边框、加框公式/例题等——图表簇内只应有序列短标签）。
+    """
     charts: list[ChartRef] = []
     try:
         clusters = page.cluster_drawings()
@@ -455,8 +501,22 @@ def _collect_charts(page, tables: list[TableInfo],
             continue
         if any(overlap_ratio(bbox, img) >= _REGION_COVER_RATIO for img in image_bboxes):
             continue
+        if _text_chars_inside(bbox, blocks) > _CHART_MAX_TEXT_CHARS:
+            continue
         charts.append(ChartRef(bbox=bbox))
     return charts
+
+
+def _text_chars_inside(
+    bbox: tuple[float, float, float, float], blocks: Sequence[TextBlock]
+) -> int:
+    """中心点落在 bbox 内的文本块的字符总量。"""
+    return sum(
+        len(block.text)
+        for block in blocks
+        if bbox[0] <= (block.bbox[0] + block.bbox[2]) / 2 <= bbox[2]
+        and bbox[1] <= (block.bbox[1] + block.bbox[3]) / 2 <= bbox[3]
+    )
 
 
 def _image_coverage(image_bboxes: Sequence[tuple[float, float, float, float]],
