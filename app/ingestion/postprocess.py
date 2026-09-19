@@ -31,6 +31,7 @@ _MIN_IMAGE_SIZE = 50          # 最小边长（像素），低于此视为装饰
 _COLOR_VAR_THRESHOLD = 10     # 色彩方差低于此视为纯色/近纯色
 _DEDUP_SIMILARITY = 0.8       # Jaccard 相似度高于此视为重复
 _OCR_TIMEOUT_SECONDS = 60     # 单张图片 OCR 超时
+_OCR_CONCURRENCY = 4          # 图片 OCR 并发数（与页级 OCR 一致）
 
 
 # ---------- 公共接口 ----------
@@ -168,10 +169,11 @@ def _prefilter(images: list[ImageInfo]) -> None:
 
 
 def _run_ocr(images: list[ImageInfo]) -> None:
-    """对图片列表执行 OCR。
+    """对图片列表并发执行 OCR：图表区用描述提示词，图片区转写文本。
 
     调用方应处于无运行中事件循环的上下文（如 to_thread 工作线程），
-    此处用 asyncio.run + wait_for 控制单张超时，超时即取消底层请求。
+    此处用 asyncio.run + Semaphore 并发；单张超时或失败只标记该张，
+    不影响其余图片。
     """
     try:
         ocr = VisionLLMOCR.from_settings()
@@ -182,22 +184,33 @@ def _run_ocr(images: list[ImageInfo]) -> None:
                 img._skipped = True
         return
 
-    for img in images:
-        if getattr(img, "_skipped", False) or img.ocr_text or img.data is None:
-            continue
-        try:
-            # 图表区用描述提示词（类型/趋势/数值），图片区维持纯文本转写
-            if img.kind == "chart":
-                img.ocr_text = asyncio.run(
-                    asyncio.wait_for(ocr.describe_chart(img.data), timeout=_OCR_TIMEOUT_SECONDS)
+    pending = [
+        img
+        for img in images
+        if not getattr(img, "_skipped", False) and not img.ocr_text and img.data is not None
+    ]
+    if not pending:
+        return
+
+    semaphore = asyncio.Semaphore(_OCR_CONCURRENCY)
+
+    async def _one(img: ImageInfo) -> None:
+        async with semaphore:
+            try:
+                coro = (
+                    ocr.describe_chart(img.data)
+                    if img.kind == "chart"
+                    else ocr.extract_text(img.data)
                 )
-            else:
-                img.ocr_text = asyncio.run(
-                    asyncio.wait_for(ocr.extract_text(img.data), timeout=_OCR_TIMEOUT_SECONDS)
-                )
-        except Exception as exc:
-            img.skipped_reason = f"ocr_failed:{exc}"
-            img._skipped = True
+                img.ocr_text = await asyncio.wait_for(coro, timeout=_OCR_TIMEOUT_SECONDS)
+            except Exception as exc:
+                img.skipped_reason = f"ocr_failed:{exc}"
+                img._skipped = True
+
+    async def _run_all() -> None:
+        await asyncio.gather(*(_one(img) for img in pending))
+
+    asyncio.run(_run_all())
 
 
 # ---------- Step 3：去重 ----------
