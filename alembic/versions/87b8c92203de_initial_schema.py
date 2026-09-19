@@ -143,33 +143,6 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['upload_id'], ['upload.id'], name=op.f('fk_job_upload_upload_id_upload')),
     sa.PrimaryKeyConstraint('job_id', 'upload_id', name=op.f('pk_job_upload'))
     )
-    op.create_table('llm_call',
-    sa.Column('id', sa.BigInteger(), autoincrement=True, nullable=False),
-    sa.Column('job_id', GUID(), nullable=False),
-    sa.Column('agent_role', sa.Text(), nullable=False),
-    sa.Column('model', sa.Text(), nullable=False),
-    sa.Column('prompt_tokens', sa.Integer(), nullable=True),
-    sa.Column('completion_tokens', sa.Integer(), nullable=True),
-    sa.Column('latency_ms', sa.Integer(), nullable=True),
-    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.ForeignKeyConstraint(['job_id'], ['job.id'], name=op.f('fk_llm_call_job_id_job'), ondelete='CASCADE'),
-    sa.PrimaryKeyConstraint('id', name=op.f('pk_llm_call'))
-    )
-    op.create_index('idx_llm_call_job', 'llm_call', ['job_id'], unique=False)
-    op.create_table('moderation_record',
-    sa.Column('id', GUID(), nullable=False),
-    sa.Column('resource_id', GUID(), nullable=False),
-    sa.Column('passed', sa.Boolean(), nullable=False),
-    sa.Column('provider', sa.Text(), nullable=False),
-    sa.Column('labels', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
-    sa.Column('raw_response', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
-    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.ForeignKeyConstraint(['resource_id'], ['resource.id'], name=op.f('fk_moderation_record_resource_id_resource'), ondelete='CASCADE'),
-    sa.PrimaryKeyConstraint('id', name=op.f('pk_moderation_record'))
-    )
-    op.create_index('ix_moderation_resource', 'moderation_record', ['resource_id'], unique=False)
     op.create_table('plan_item',
     sa.Column('id', GUID(), nullable=False),
     sa.Column('job_id', GUID(), nullable=False),
@@ -187,59 +160,12 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('id', name=op.f('pk_plan_item')),
     sa.UniqueConstraint('job_id', 'seq', name=op.f('uq_plan_item_job_id'))
     )
-    op.create_table('question',
-    sa.Column('id', GUID(), nullable=False),
-    sa.Column('job_id', GUID(), nullable=False),
-    sa.Column('plan_item_id', GUID(), nullable=False),
-    sa.Column('seq', sa.Integer(), nullable=False),
-    sa.Column('question_type', sa.Text(), nullable=False),
-    sa.Column('stem', sa.Text(), nullable=False),
-    sa.Column('options', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
-    sa.Column('answer', sa.Text(), nullable=False),
-    sa.Column('sub_questions', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
-    sa.Column('sub_answers', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
-    sa.Column('explanation', sa.Text(), nullable=True),
-    sa.Column('retry_count', sa.Integer(), nullable=False),
-    sa.Column('replanned_from', GUID(), nullable=True),
-    sa.Column('review_passed', sa.Boolean(), nullable=True),
-    sa.Column('status', sa.Text(), nullable=False),
-    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.CheckConstraint("question_type <> 'choice' OR options IS NOT NULL", name=op.f('ck_question_choice_has_options')),
-    sa.CheckConstraint('(sub_questions IS NULL) = (sub_answers IS NULL)', name=op.f('ck_question_sub_pair')),
-    sa.CheckConstraint('retry_count <= 3', name=op.f('ck_question_retry_bounded')),
-    sa.ForeignKeyConstraint(['job_id'], ['job.id'], name=op.f('fk_question_job_id_job'), ondelete='CASCADE'),
-    sa.ForeignKeyConstraint(['plan_item_id'], ['plan_item.id'], name=op.f('fk_question_plan_item_id_plan_item')),
-    sa.ForeignKeyConstraint(['replanned_from'], ['plan_item.id'], name=op.f('fk_question_replanned_from_plan_item')),
-    sa.PrimaryKeyConstraint('id', name=op.f('pk_question')),
-    sa.UniqueConstraint('job_id', 'seq', name=op.f('uq_question_job_id'))
-    )
-    op.create_index('idx_question_job', 'question', ['job_id', 'seq'], unique=False)
-    op.create_table('retry_log',
-    sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
-    sa.Column('question_id', GUID(), nullable=True),
-    sa.Column('plan_item_id', GUID(), nullable=False),
-    sa.Column('attempt', sa.Integer(), nullable=False),
-    sa.Column('reason', sa.Text(), nullable=False),
-    sa.Column('counted', sa.Boolean(), nullable=False),
-    sa.Column('detail', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
-    sa.ForeignKeyConstraint(['plan_item_id'], ['plan_item.id'], name=op.f('fk_retry_log_plan_item_id_plan_item')),
-    sa.ForeignKeyConstraint(['question_id'], ['question.id'], name=op.f('fk_retry_log_question_id_question'), ondelete='CASCADE'),
-    sa.PrimaryKeyConstraint('id', name=op.f('pk_retry_log'))
-    )
     # ### end Alembic commands ###
 
 
 def downgrade() -> None:
     # ### commands auto generated by Alembic - please adjust! ###
-    op.drop_table('retry_log')
-    op.drop_index('idx_question_job', table_name='question')
-    op.drop_table('question')
     op.drop_table('plan_item')
-    op.drop_index('ix_moderation_resource', table_name='moderation_record')
-    op.drop_table('moderation_record')
-    op.drop_index('idx_llm_call_job', table_name='llm_call')
-    op.drop_table('llm_call')
     op.drop_table('job_upload')
     op.drop_index('idx_job_stage_job_seq', table_name='job_stage')
     op.drop_table('job_stage')
