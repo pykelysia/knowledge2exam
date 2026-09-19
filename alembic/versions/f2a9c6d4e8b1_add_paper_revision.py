@@ -11,6 +11,7 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 from app.models.base import GUID
 
@@ -28,7 +29,7 @@ def upgrade() -> None:
         sa.Column('job_id', GUID(), nullable=False),
         sa.Column('round_no', sa.Integer(), nullable=False),
         sa.Column('status', sa.Text(), nullable=False, server_default='running'),
-        sa.Column('selection', sa.postgresql.JSONB(), nullable=True),
+        sa.Column('selection', postgresql.JSONB(), nullable=True),
         sa.Column('feedback', sa.Text(), nullable=False),
         sa.Column('snapshot_before', sa.Text(), nullable=False, server_default=''),
         sa.Column('snapshot_after', sa.Text(), nullable=True),
@@ -39,11 +40,9 @@ def upgrade() -> None:
         sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
         sa.ForeignKeyConstraint(['job_id'], ['job.id'], name=op.f('fk_paper_revision_job_id_job'), ondelete='CASCADE'),
         sa.PrimaryKeyConstraint('id', name=op.f('pk_paper_revision')),
-        sa.UniqueConstraint('job_id', 'round_no', name=op.f('uq_paper_revision_job_id_round_no')),
+        sa.UniqueConstraint('job_id', 'round_no', name=op.f('uq_paper_revision_job_id')),
     )
-    op.create_index('ix_paper_revision_job_id', 'paper_revision', ['job_id'], unique=False)
 
 
 def downgrade() -> None:
-    op.drop_index('ix_paper_revision_job_id', table_name='paper_revision')
     op.drop_table('paper_revision')
