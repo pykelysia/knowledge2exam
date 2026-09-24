@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -36,3 +36,7 @@ class PaperRevision(Base, TimestampMixin):
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 偏好沉淀：save_preference 为用户勾选的输入标记，preference_saved 为
+    # 本轮结束后的结果标记（服务端静默处理，供修订历史回显）
+    save_preference: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    preference_saved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

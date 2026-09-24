@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     # Skill system（ReAct agent 的技能目录）
     skills_dir: Path = Path("./skills")
 
+    # 课程偏好沉淀：单个 (school_id, course_id) 作用域的偏好条数上限
+    max_course_preferences: int = 50
+
     # 嵌入模型（OpenAI 兼容 embeddings 协议）
     embedding_api_key: str = ""
     embedding_base_url: str = "https://api.openai.com/v1"

@@ -12,6 +12,7 @@ from app.models.job import Job, JobStage, JobUpload
 from app.models.plan import PlanItem
 from app.models.resource import Resource
 from app.models.revision import PaperRevision
+from app.models.skill import CoursePreference
 from app.models.upload import Upload
 from app.models.user import AppUser
 
@@ -29,4 +30,5 @@ __all__ = [
     "JobStage",
     "PlanItem",
     "PaperRevision",
+    "CoursePreference",
 ]
