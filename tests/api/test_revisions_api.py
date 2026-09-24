@@ -53,9 +53,10 @@ def api(monkeypatch: pytest.MonkeyPatch):
     user = SimpleNamespace(id=job.user_id)
     captured: dict[str, Any] = {}
 
-    async def fake_start(db, job_, selection, feedback):  # noqa: ANN001
+    async def fake_start(db, job_, selection, feedback, *, save_preference=False):  # noqa: ANN001
         captured["selection"] = selection
         captured["feedback"] = feedback
+        captured["save_preference"] = save_preference
         return SimpleNamespace(id=uuid.uuid4(), round_no=1, status="running")
 
     async def fake_list(db, job_id):  # noqa: ANN001
@@ -94,6 +95,35 @@ class TestCreateRevision:
         # 划选锚点原样透传给编排层
         assert captured["selection"]["text"] == "1+1=？"
         assert captured["feedback"] == "加大难度"
+        # 未勾选沉淀 → 默认 False
+        assert captured["save_preference"] is False
+
+    async def test_save_preference_requires_scope(self, api) -> None:
+        """勾选沉淀但任务无学校/课程作用域 → 400 PREFERENCE_SCOPE_REQUIRED。"""
+        client, _session, job, captured = api
+        job.school_id = None
+        job.course_id = None
+        payload = revision_payload()
+        payload["save_preference"] = True
+        async with await client() as http:
+            res = await http.post(f"/api/v1/jobs/{job.id}/revisions", json=payload)
+
+        assert res.status_code == 400
+        assert res.json()["error_code"] == "PREFERENCE_SCOPE_REQUIRED"
+        assert "start" not in captured
+
+    async def test_save_preference_passed_through(self, api) -> None:
+        """带作用域勾选沉淀 → 透传给编排层。"""
+        client, _session, job, captured = api
+        job.school_id = uuid.uuid4()
+        job.course_id = uuid.uuid4()
+        payload = revision_payload()
+        payload["save_preference"] = True
+        async with await client() as http:
+            res = await http.post(f"/api/v1/jobs/{job.id}/revisions", json=payload)
+
+        assert res.status_code == 202
+        assert captured["save_preference"] is True
 
     async def test_job_not_finished_conflicts(self, api) -> None:
         client, _session, job, _captured = api

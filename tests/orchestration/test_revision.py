@@ -7,10 +7,13 @@ from typing import Any
 
 import pytest
 
+from app.agents.preference import PreferenceDecision
 from app.agents.schemas import ExamResult
+from app.config import settings
 from app.core.exceptions import PaperNotReady
 from app.models.job import JobStage
 from app.models.revision import PaperRevision
+from app.models.skill import CoursePreference
 from app.orchestration import revision as revision_module
 from tests.orchestration.helpers import FakeJob
 
@@ -306,3 +309,180 @@ class TestListRevisions:
 
         # fake 的 scalars 按队列出参，排序由真实 SQL 保证；这里只验证透传
         assert rows == [r1, r2]
+
+
+class TestRunRevisionRoundPreference:
+    """轮首偏好沉淀：勾选时提炼落库，未勾选也注入既有偏好。"""
+
+    def _patch(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        job: FakeJob,
+        session: FakeRevisionSession,
+        storage: FakePaperStorage,
+        *,
+        decision: PreferenceDecision | None = None,
+        consolidate_error: Exception | None = None,
+    ) -> dict[str, Any]:
+        captured: dict[str, Any] = {}
+
+        async def fake_agent(job_id, context, hooks=None):  # noqa: ANN001
+            captured["context"] = dict(context)
+            return ExamResult(completed_normally=True, render_status="succeeded")
+
+        async def fake_consolidate(model, *, feedback, selection_text, existing):  # noqa: ANN001
+            captured["consolidate"] = {
+                "feedback": feedback,
+                "selection_text": selection_text,
+                "existing": list(existing),
+            }
+            if consolidate_error is not None:
+                raise consolidate_error
+            return decision
+
+        monkeypatch.setattr(revision_module, "run_exam_agent", fake_agent)
+        monkeypatch.setattr(revision_module, "consolidate_preference", fake_consolidate)
+        monkeypatch.setattr(revision_module, "get_chat_model", lambda: object())
+        monkeypatch.setattr(revision_module, "storage", storage)
+        monkeypatch.setattr(revision_module, "AsyncSessionLocal", lambda: session)
+        return captured
+
+    @staticmethod
+    def _scoped_job() -> FakeJob:
+        job = FakeJob(status="completed")
+        job.school_id = uuid.uuid4()
+        job.course_id = uuid.uuid4()
+        return job
+
+    async def test_preference_saved_when_checked(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """勾选沉淀：提炼 → 新增条目 → 事件与回显标记，偏好注入修订上下文。"""
+        job = self._scoped_job()
+        revision = make_revision(job)
+        revision.save_preference = True
+        existing = CoursePreference(
+            school_id=job.school_id, course_id=job.course_id, content="既有偏好"
+        )
+        # scalars 依次：沉淀前既有条目、沉淀后重载、历史轮次、upload_ids
+        session = FakeRevisionSession(
+            job, revision, scalars_results=[[existing], [existing], [], []]
+        )
+        storage = FakePaperStorage({f"jobs/{job.id}/output/paper.md": PAPER_NEW})
+        decision = PreferenceDecision(action="add", content="题目应有综合性")
+        captured = self._patch(monkeypatch, job, session, storage, decision=decision)
+
+        await revision_module._run_revision_round(uuid.uuid4())
+
+        added = [r for r in session.added if isinstance(r, CoursePreference)]
+        assert len(added) == 1 and added[0].content == "题目应有综合性"
+        assert revision.preference_saved is True
+        assert len(session.events("preference_saved")) == 1
+        assert captured["context"]["course_preferences"] == ["既有偏好"]
+        # 提炼输入：本轮反馈与划选
+        assert captured["consolidate"]["feedback"] == "换个角度"
+        assert captured["consolidate"]["selection_text"] == "旧题干"
+
+    async def test_llm_failure_falls_back_verbatim(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """提炼失败：降级原文保存并告警，轮次继续。"""
+        job = self._scoped_job()
+        revision = make_revision(job)
+        revision.save_preference = True
+        session = FakeRevisionSession(job, revision, scalars_results=[[], [], [], []])
+        storage = FakePaperStorage({f"jobs/{job.id}/output/paper.md": PAPER_NEW})
+        self._patch(
+            monkeypatch, job, session, storage, consolidate_error=RuntimeError("llm down")
+        )
+
+        await revision_module._run_revision_round(uuid.uuid4())
+
+        added = [r for r in session.added if isinstance(r, CoursePreference)]
+        assert len(added) == 1
+        assert added[0].content.startswith("用户反馈（原文沉淀）：换个角度")
+        assert revision.preference_saved is True
+        warning_msgs = [w.payload.get("message", "") for w in session.events("warning")]
+        assert any(
+            msg.startswith("偏好提炼失败") and "RuntimeError" in msg for msg in warning_msgs
+        )
+        # 告警只暴露异常类名，不携带原始异常文本
+        assert all("llm down" not in msg for msg in warning_msgs)
+
+    async def test_empty_llm_content_uses_wired_fallback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """LLM 返回 add 但内容为空：生产路径已接线 fallback，不静默丢沉淀请求。"""
+        job = self._scoped_job()
+        revision = make_revision(job)
+        revision.save_preference = True
+        session = FakeRevisionSession(job, revision, scalars_results=[[], [], [], []])
+        storage = FakePaperStorage({f"jobs/{job.id}/output/paper.md": PAPER_NEW})
+        decision = PreferenceDecision(action="add", content="  ")  # 模型抖动返回空内容
+        self._patch(monkeypatch, job, session, storage, decision=decision)
+
+        await revision_module._run_revision_round(uuid.uuid4())
+
+        added = [r for r in session.added if isinstance(r, CoursePreference)]
+        assert len(added) == 1
+        assert added[0].content.startswith("用户反馈（原文沉淀）：换个角度")
+        assert revision.preference_saved is True
+
+    async def test_preferences_injected_even_when_not_checked(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """未勾选：不提炼不落库，但既有偏好仍注入上下文。"""
+        job = self._scoped_job()
+        revision = make_revision(job)
+        existing = CoursePreference(
+            school_id=job.school_id, course_id=job.course_id, content="既有偏好"
+        )
+        # scalars 依次：重载既有条目、历史轮次、upload_ids
+        session = FakeRevisionSession(job, revision, scalars_results=[[existing], [], []])
+        storage = FakePaperStorage({f"jobs/{job.id}/output/paper.md": PAPER_NEW})
+        captured = self._patch(monkeypatch, job, session, storage)
+
+        await revision_module._run_revision_round(uuid.uuid4())
+
+        assert "consolidate" not in captured
+        assert captured["context"]["course_preferences"] == ["既有偏好"]
+        assert session.events("preference_saved") == []
+        # 未勾选轮次不改写标记（未 flush 的 ORM 列默认值可为 None，取 falsy 语义）
+        assert not revision.preference_saved
+
+    async def test_cap_exceeded_warns(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """条数触顶：不保存、置告警、preference_saved 保持 False。"""
+        monkeypatch.setattr(settings, "max_course_preferences", 0)
+        job = self._scoped_job()
+        revision = make_revision(job)
+        revision.save_preference = True
+        session = FakeRevisionSession(job, revision, scalars_results=[[], [], [], []])
+        storage = FakePaperStorage({f"jobs/{job.id}/output/paper.md": PAPER_NEW})
+        decision = PreferenceDecision(action="add", content="新偏好")
+        self._patch(monkeypatch, job, session, storage, decision=decision)
+
+        await revision_module._run_revision_round(uuid.uuid4())
+
+        assert [r for r in session.added if isinstance(r, CoursePreference)] == []
+        assert revision.preference_saved is False
+        assert any("上限" in w.payload.get("message", "") for w in session.events("warning"))
+
+    async def test_preference_db_failure_fails_round(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """偏好落库 DB 层异常：冒泡到包装层收敛为 failed 并发事件，不向上抛。"""
+        job = self._scoped_job()
+        revision = make_revision(job)
+        revision.save_preference = True
+        session = FakeRevisionSession(job, revision, scalars_results=[[], []])
+        storage = FakePaperStorage({f"jobs/{job.id}/output/paper.md": PAPER_NEW})
+        self._patch(monkeypatch, job, session, storage)
+
+        async def boom(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(revision_module, "apply_preference_decision", boom)
+
+        await revision_module._run_revision_with_cancellation(uuid.uuid4())
+
+        assert revision.status == "failed"
+        assert "db down" in (revision.error or "")
+        assert len(session.events("revision_failed")) == 1
