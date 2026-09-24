@@ -46,6 +46,7 @@ from app.models.resource import Resource
 from app.models.upload import Upload
 from app.orchestration.events import EventBus
 from app.orchestration.integration import persist_exam_result
+from app.orchestration.preference import list_course_preferences
 from app.orchestration.state_machine import TERMINAL_STATUSES, JobStatus, Stage
 from app.retrieval.vector_store import PgVectorStore
 
@@ -258,6 +259,11 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
         "course_id": job.course_id,
         "upload_ids": await _get_job_upload_ids(db, job.id),
     }
+
+    # 本校本课程沉淀的出题偏好：聚合为伪技能注入技能索引（【必读】）
+    if job.school_id is not None and job.course_id is not None:
+        preference_rows = await list_course_preferences(db, job.school_id, job.course_id)
+        main_agent_context["course_preferences"] = [row.content for row in preference_rows]
 
     async def on_plan_ready(todos: list) -> None:  # noqa: ANN001
         distribution: dict[str, int] = {}

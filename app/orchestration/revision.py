@@ -17,6 +17,12 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents import AgentHooks, run_exam_agent
+from app.agents.llm import get_chat_model
+from app.agents.preference import (
+    PreferenceDecision,
+    consolidate_preference,
+    verbatim_preference,
+)
 from app.core.db import AsyncSessionLocal
 from app.core.events import EventBus
 from app.core.exceptions import ErrorCode, PaperNotReady
@@ -24,6 +30,8 @@ from app.core.storage import storage
 from app.core.task_registry import register
 from app.models.job import Job, JobUpload
 from app.models.revision import PaperRevision
+from app.models.skill import CoursePreference
+from app.orchestration.preference import apply_preference_decision, list_course_preferences
 from app.orchestration.state_machine import JobStatus
 
 logger = logging.getLogger(__name__)
@@ -44,11 +52,17 @@ async def read_paper(job_id: uuid.UUID) -> str:
 
 
 async def start_revision(
-    db: AsyncSession, job: Job, selection: dict, feedback: str
+    db: AsyncSession,
+    job: Job,
+    selection: dict,
+    feedback: str,
+    *,
+    save_preference: bool = False,
 ) -> PaperRevision:
     """创建修订轮并启动后台续跑任务。
 
-    调用方保证：job 属于当前用户、处于可修订终态、没有正在运行的任务。
+    调用方保证：job 属于当前用户、处于可修订终态、没有正在运行的任务；
+    勾选沉淀时 job 已带 school_id/course_id 作用域。
     """
     snapshot_before = await read_paper(job.id)
 
@@ -65,6 +79,7 @@ async def start_revision(
         selection=selection,
         feedback=feedback,
         snapshot_before=snapshot_before,
+        save_preference=save_preference,
     )
     db.add(revision)
     await db.flush()
@@ -91,6 +106,60 @@ async def list_revisions(db: AsyncSession, job_id: uuid.UUID) -> list[PaperRevis
         )
     ).all()
     return list(rows)
+
+
+async def _settle_course_preference(
+    db: AsyncSession, job: Job, revision: PaperRevision
+) -> None:
+    """执行一轮偏好沉淀：提炼 → 落库 → 事件，随后独立 commit。
+
+    提炼 LLM 调用失败时降级为原文保存并告警；落库立即提交，
+    不随后续 agent 轮次成败回滚（偏好源自用户反馈本身，与轮次结果无关）。
+    """
+    bus = EventBus(db)
+    existing = await list_course_preferences(db, job.school_id, job.course_id)
+    try:
+        decision = await consolidate_preference(
+            get_chat_model(),
+            feedback=revision.feedback,
+            selection_text=(revision.selection or {}).get("text", ""),
+            existing=[(r.id, r.content) for r in existing],
+        )
+    except Exception as exc:
+        logger.exception("偏好提炼失败（revision=%s），降级原文保存", revision.id)
+        await bus.emit(
+            job.id,
+            "warning",
+            {
+                "code": ErrorCode.AGENT_WARNING,
+                "message": f"偏好提炼失败，已按原文沉淀：{type(exc).__name__}",
+            },
+        )
+        decision = PreferenceDecision(
+            action="add", content=verbatim_preference(revision.feedback)
+        )
+
+    result = await apply_preference_decision(
+        db,
+        job=job,
+        revision=revision,
+        decision=decision,
+        fallback_content=verbatim_preference(revision.feedback),
+    )
+    revision.preference_saved = result.saved
+    if result.saved:
+        await bus.emit(
+            job.id,
+            "preference_saved",
+            {"round_no": revision.round_no, "note": result.note},
+        )
+    elif result.warn:
+        await bus.emit(
+            job.id,
+            "warning",
+            {"code": ErrorCode.AGENT_WARNING, "message": result.note},
+        )
+    await db.commit()
 
 
 async def _run_revision_with_cancellation(revision_id: uuid.UUID) -> None:
@@ -137,6 +206,14 @@ async def _run_revision_round(revision_id: uuid.UUID) -> None:
         if job is None:
             return
 
+        # 偏好沉淀：勾选时先提炼并落库（独立 commit，不随轮次成败回滚）；
+        # 无论是否勾选都加载该课程既有偏好注入上下文（修订同样受偏好约束）
+        preference_rows: list[CoursePreference] = []
+        if job.school_id is not None and job.course_id is not None:
+            if revision.save_preference:
+                await _settle_course_preference(db, job, revision)
+            preference_rows = await list_course_preferences(db, job.school_id, job.course_id)
+
         # 会话记录：既往成功轮次（旧→新）注入提示词
         history_rows = (
             await db.scalars(
@@ -165,6 +242,7 @@ async def _run_revision_round(revision_id: uuid.UUID) -> None:
             "school_id": job.school_id,
             "course_id": job.course_id,
             "upload_ids": upload_ids,
+            "course_preferences": [row.content for row in preference_rows],
             "revision": {
                 "selection": revision.selection,
                 "feedback": revision.feedback,
