@@ -32,7 +32,11 @@ from app.agents.schemas import (
     ExamResult,
     RevisionDirective,
 )
-from app.agents.skills import SkillLoader
+from app.agents.skills import (
+    CompositeSkillLoader,
+    SkillLoader,
+    build_course_preference_skill,
+)
 from app.agents.tools import (
     PAPER_PATH,
     AgentContext,
@@ -77,11 +81,16 @@ async def run_exam_agent(
     if context.get("revision"):
         revision = RevisionDirective.model_validate(context["revision"])
 
+    # 课程偏好聚合为单个伪技能，与全局技能目录组合进同一索引；
+    # 生成与修订共用 ctx.skills，两条链路都会受偏好约束
+    preferences = [str(p) for p in (context.get("course_preferences") or [])]
+    extra_skills = [build_course_preference_skill(preferences)] if preferences else []
+
     ctx = AgentContext(
         job_id=job_id,
         workspace=workspace,
         storage=storage,
-        skills=SkillLoader(settings.skills_dir),
+        skills=CompositeSkillLoader(SkillLoader(settings.skills_dir), extra_skills),
         vector_store=PgVectorStore(AsyncSessionLocal),
         hooks=hooks,
         user_id=context.get("user_id"),

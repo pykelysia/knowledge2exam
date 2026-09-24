@@ -32,7 +32,7 @@ from app.agents.schemas import (
     RevisionDirective,
     TodoItem,
 )
-from app.agents.skills import SkillError, SkillLoader
+from app.agents.skills import SkillError, SkillSource
 from app.agents.workspace import Workspace, WorkspaceError
 from app.core.enums import SourceType
 from app.core.storage import Storage
@@ -66,7 +66,7 @@ class AgentContext:
     job_id: UUID
     workspace: Workspace
     storage: Storage
-    skills: SkillLoader
+    skills: SkillSource
     vector_store: VectorStore
     hooks: AgentHooks
     user_id: UUID | None = None
