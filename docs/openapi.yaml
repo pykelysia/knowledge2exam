@@ -232,6 +232,8 @@ paths:
         - `revision_started`：`{round_no, feedback}` —— 一轮划选反馈修订开始
         - `revision_done`：`{round_no, render_status}` —— 修订完成，试卷已更新并重渲染
         - `revision_failed`：`{round_no, message}` —— 修订失败（agent 异常或未产生修改）
+        - `preference_saved`：`{round_no, note}` —— 勾选的反馈已沉淀为课程出题偏好
+          （服务端静默处理，note 为合并结果说明）
         - `done`：`{status, total?, abandoned?, md_url?, pdf_url?}` —— 终态关闭事件；
           `status` ∈ completed / partially_completed / failed / cancelled（取消时仅含 status）
       parameters:
@@ -686,6 +688,16 @@ components:
           type: integer
         need_explanation:
           type: boolean
+        school_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: 任务绑定的学校（偏好沉淀作用域之一，无则不可沉淀）
+        course_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: 任务绑定的课程（偏好沉淀作用域之一，无则不可沉淀）
         plan:
           $ref: '#/components/schemas/Plan'
         progress:
@@ -752,6 +764,10 @@ components:
         feedback:
           type: string
           description: 用户对所选部分的修订要求
+        save_preference:
+          type: boolean
+          default: false
+          description: 是否把本条反馈沉淀为该课程（同校同课程作用域）的持久出题偏好
     RevisionAccepted:
       type: object
       required: [revision_id, round_no, status]
@@ -797,6 +813,9 @@ components:
           type: string
           format: date-time
           nullable: true
+        preference_saved:
+          type: boolean
+          description: 本轮反馈是否已沉淀为课程出题偏好
     RevisionsResponse:
       type: object
       required: [job_id, total, revisions]
@@ -880,6 +899,7 @@ components:
         - JOB_NOT_FINISHED
         - REVISION_IN_PROGRESS
         - PAPER_NOT_READY
+        - PREFERENCE_SCOPE_REQUIRED
         - PARSE_FAILED
         - OCR_DEGRADED
         - PLANNING_FAILED

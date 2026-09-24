@@ -18,7 +18,8 @@
 | **PDF 渲染** | Pandoc + XeLaTeX 渲染试卷（题目与答案解析分篇）；环境缺依赖时自动降级为仅交付 Markdown |
 | **结果检验** | 渲染失败错误回传 agent 自行修正（独立重试上限，超限降级为 `partially_completed`）；蓝图中的放弃题保留标记 |
 | **划选修订** | 任务完成后在整卷预览中划选任意范围提交反馈，同一 agent 携带全部历史会话直接续跑改卷，会话与快照落库可回溯 |
-| **进度推送** | SSE 实时事件流（9 种事件类型），断线按 Last-Event-ID 补发历史事件 |
+| **偏好沉淀** | 修订反馈可勾选沉淀为课程级出题偏好（同校同课程作用域）：小 LLM 提炼泛化并与既有条目合并去重（add/update/delete/noop），出题与修订时聚合为 `course-preferences` 伪技能注入技能索引（【必读】） |
+| **进度推送** | SSE 实时事件流（10 种事件类型），断线按 Last-Event-ID 补发历史事件 |
 
 ---
 
@@ -403,6 +404,7 @@ uv run alembic downgrade -1
 | `AGENT_MAX_RETRIES` | 单题校验失败重试上限（超限放弃该题） | 3 |
 | `AGENT_MAX_RENDER_RETRIES` | 整卷渲染失败重试上限 | 3 |
 | `SKILLS_DIR` | agent 技能目录 | `./skills` |
+| `MAX_COURSE_PREFERENCES` | 单课程偏好条数上限（超限不再沉淀并告警） | 50 |
 | `EMBEDDING_API_KEY` | 嵌入模型 API 密钥 | — |
 | `EMBEDDING_BASE_URL` | 嵌入接口地址 | `https://api.openai.com/v1` |
 | `EMBEDDING_MODEL` | 嵌入模型 | `text-embedding-3-small` |
