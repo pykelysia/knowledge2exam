@@ -21,6 +21,9 @@ class RevisionCreate(BaseModel):
 
     selection: SelectionPayload
     feedback: str = Field(min_length=1, description="用户对所选部分的修订要求")
+    save_preference: bool = Field(
+        default=False, description="是否把本条反馈沉淀为该课程的持久出题偏好"
+    )
 
 
 class RevisionAccepted(BaseModel):
@@ -43,6 +46,7 @@ class RevisionItem(BaseModel):
     error: str | None = None
     created_at: datetime
     applied_at: datetime | None = None
+    preference_saved: bool = False
 
 
 class RevisionsResponse(BaseModel):

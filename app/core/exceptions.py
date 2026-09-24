@@ -29,6 +29,7 @@ class ErrorCode(StrEnum):
     JOB_NOT_FINISHED = "JOB_NOT_FINISHED"
     REVISION_IN_PROGRESS = "REVISION_IN_PROGRESS"
     PAPER_NOT_READY = "PAPER_NOT_READY"
+    PREFERENCE_SCOPE_REQUIRED = "PREFERENCE_SCOPE_REQUIRED"
     # 生成过程（无 HTTP 状态，作为 warning / error 事件）
     PARSE_FAILED = "PARSE_FAILED"
     OCR_DEGRADED = "OCR_DEGRADED"
@@ -68,6 +69,7 @@ _ERROR_CODE_HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.JOB_NOT_FINISHED: 409,
     ErrorCode.REVISION_IN_PROGRESS: 409,
     ErrorCode.PAPER_NOT_READY: 409,
+    ErrorCode.PREFERENCE_SCOPE_REQUIRED: 400,
     ErrorCode.RENDER_FAILED: 409,
     ErrorCode.MODEL_UNAVAILABLE: 503,
     ErrorCode.RATE_LIMITED: 429,
@@ -184,6 +186,13 @@ class RevisionInProgress(AppException):
 class PaperNotReady(AppException):
     def __init__(self) -> None:
         super().__init__(ErrorCode.PAPER_NOT_READY, "试卷尚未生成，无法修订")
+
+
+class PreferenceScopeRequired(AppException):
+    def __init__(self) -> None:
+        super().__init__(
+            ErrorCode.PREFERENCE_SCOPE_REQUIRED, "保存课程偏好需要任务带有学校与课程信息"
+        )
 
 
 class RenderFailed(AppException):

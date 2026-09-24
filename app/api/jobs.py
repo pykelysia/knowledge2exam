@@ -86,6 +86,8 @@ async def _job_to_schema(
         stage=Stage(job.status) if job.status in {s.value for s in Stage} else None,
         duration_minutes=job.duration_minutes,
         need_explanation=job.need_explanation,
+        school_id=job.school_id,
+        course_id=job.course_id,
         plan=plan,
         progress=None,
         warnings=[Warning(**w) for w in (job.warnings or [])],

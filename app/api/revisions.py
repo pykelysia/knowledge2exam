@@ -10,7 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.core.deps import get_current_user
-from app.core.exceptions import JobNotFinished, JobNotFound, RevisionInProgress
+from app.core.exceptions import (
+    JobNotFinished,
+    JobNotFound,
+    PreferenceScopeRequired,
+    RevisionInProgress,
+)
 from app.core.task_registry import is_running
 from app.models.job import Job
 from app.models.user import AppUser
@@ -52,6 +57,7 @@ def _to_item(row: object) -> RevisionItem:  # noqa: ANN001 — PaperRevision ORM
         error=row.error,
         created_at=row.created_at,
         applied_at=row.applied_at,
+        preference_saved=bool(getattr(row, "preference_saved", False)),
     )
 
 
@@ -68,8 +74,16 @@ async def create_revision(
         raise JobNotFinished()
     if is_running(job_id):
         raise RevisionInProgress()
+    if payload.save_preference and (job.school_id is None or job.course_id is None):
+        raise PreferenceScopeRequired()
 
-    revision = await start_revision(db, job, payload.selection.model_dump(), payload.feedback)
+    revision = await start_revision(
+        db,
+        job,
+        payload.selection.model_dump(),
+        payload.feedback,
+        save_preference=payload.save_preference,
+    )
     return RevisionAccepted(
         revision_id=revision.id,
         round_no=revision.round_no,

@@ -70,6 +70,8 @@ class Job(BaseModel):
     stage: Stage | None = None
     duration_minutes: int = 100
     need_explanation: bool = False
+    school_id: uuid.UUID | None = None
+    course_id: uuid.UUID | None = None
     plan: Plan | None = None
     progress: Progress | None = None
     warnings: list[Warning] = Field(default_factory=list)
