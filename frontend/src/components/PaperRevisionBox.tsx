@@ -9,8 +9,10 @@ interface PaperRevisionBoxProps {
   anchor: TextSelectionAnchor
   rect: DOMRect
   running: boolean
+  /** 任务带有学校+课程作用域时才允许勾选沉淀 */
+  canSavePreference: boolean
   onClose: () => void
-  onSubmit: (feedback: string) => void
+  onSubmit: (feedback: string, savePreference: boolean) => void
 }
 
 /** 选区预览的最大长度 */
@@ -24,10 +26,12 @@ export function PaperRevisionBox({
   anchor,
   rect,
   running,
+  canSavePreference,
   onClose,
   onSubmit,
 }: PaperRevisionBoxProps) {
   const [feedback, setFeedback] = useState('')
+  const [savePreference, setSavePreference] = useState(false)
 
   // 视口内夹取，避免反馈框溢出屏幕
   const width = 460
@@ -70,10 +74,23 @@ export function PaperRevisionBox({
         className="mt-2.5 text-[13px]"
         onKeyDown={(e) => {
           if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && feedback.trim() && !running) {
-            onSubmit(feedback.trim())
+            onSubmit(feedback.trim(), canSavePreference && savePreference)
           }
         }}
       />
+
+      {canSavePreference && (
+        <label className="mt-2 flex cursor-pointer items-center gap-1.5 text-[12.5px] text-slate-600">
+          <input
+            type="checkbox"
+            checked={savePreference}
+            disabled={running}
+            onChange={(e) => setSavePreference(e.target.checked)}
+            className="h-3.5 w-3.5 cursor-pointer accent-slate-800"
+          />
+          沉淀为本课程出题偏好（之后本校本课程出题都会遵守）
+        </label>
+      )}
 
       <div className="mt-2.5 flex items-center justify-end gap-2">
         <Button variant="secondary" size="sm" onClick={onClose} disabled={running}>
@@ -82,7 +99,7 @@ export function PaperRevisionBox({
         <Button
           variant="primary"
           size="sm"
-          onClick={() => onSubmit(feedback.trim())}
+          onClick={() => onSubmit(feedback.trim(), canSavePreference && savePreference)}
           disabled={!feedback.trim() || running}
         >
           {running ? <Spinner className="h-3.5 w-3.5" /> : <SendHorizonal className="h-3.5 w-3.5" />}

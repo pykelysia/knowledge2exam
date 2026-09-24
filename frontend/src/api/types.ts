@@ -121,6 +121,8 @@ export interface Job {
   stage?: Stage
   duration_minutes?: number
   need_explanation?: boolean
+  school_id?: string | null
+  course_id?: string | null
   plan?: Plan
   progress?: Progress
   warnings?: Warning[]
@@ -146,6 +148,8 @@ export interface SelectionAnchor {
 export interface RevisionCreate {
   selection: SelectionAnchor
   feedback: string
+  /** 是否把本条反馈沉淀为该课程的持久出题偏好 */
+  save_preference?: boolean
 }
 
 export interface RevisionAccepted {
@@ -166,6 +170,8 @@ export interface RevisionItem {
   error?: string | null
   created_at: string
   applied_at?: string | null
+  /** 本轮反馈是否已沉淀为课程出题偏好 */
+  preference_saved?: boolean
 }
 
 export interface RevisionsResponse {
@@ -213,6 +219,7 @@ export type ErrorCode =
   | 'JOB_NOT_FINISHED'
   | 'REVISION_IN_PROGRESS'
   | 'PAPER_NOT_READY'
+  | 'PREFERENCE_SCOPE_REQUIRED'
   | 'PARSE_FAILED'
   | 'PLANNING_FAILED'
   | 'GENERATION_EXHAUSTED'
@@ -249,6 +256,7 @@ export type JobEventType =
   | 'revision_started'
   | 'revision_done'
   | 'revision_failed'
+  | 'preference_saved'
 
 export interface StageChangedData {
   stage: Stage
@@ -273,6 +281,8 @@ export interface RevisionEventData {
   feedback?: string
   message?: string
   render_status?: string
+  /** preference_saved 事件：偏好沉淀结果说明 */
+  note?: string
 }
 
 export interface WarningData {

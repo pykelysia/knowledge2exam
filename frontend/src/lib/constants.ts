@@ -62,6 +62,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
   JOB_NOT_FINISHED: '任务尚未完成，完成后才能修订',
   REVISION_IN_PROGRESS: '已有修订正在进行，请等待完成后再提交',
   PAPER_NOT_READY: '试卷尚未生成，无法修订',
+  PREFERENCE_SCOPE_REQUIRED: '该任务未绑定学校与课程，无法沉淀为课程偏好',
   PARSE_FAILED: '资料解析失败，对应内容将被跳过',
   MODEL_UNAVAILABLE: '模型服务不可用，请稍后重试',
   RATE_LIMITED: '请求过于频繁，请稍后重试',

@@ -219,7 +219,7 @@ export function JobDetail() {
           break
         }
         case 'revision_failed': {
-          const d = data as Extract<JobEventData, { round_no: number; message?: string }>
+          const d = data as Extract<JobEventData, { round_no: number }>
           setRevisionRunning(false)
           setLogs((prev) => [
             ...prev,
@@ -230,6 +230,17 @@ export function JobDetail() {
             },
           ])
           if (jobId) void loadRevisions(jobId)
+          break
+        }
+        case 'preference_saved': {
+          const d = data as Extract<JobEventData, { round_no: number }>
+          setLogs((prev) => [
+            ...prev,
+            {
+              time: nowTime(),
+              text: `第 ${d.round_no} 轮反馈已沉淀为课程出题偏好${d.note ? `（${d.note}）` : ''}`,
+            },
+          ])
           break
         }
         case 'warning': {
@@ -293,10 +304,14 @@ export function JobDetail() {
   const revisionable = job !== null && REVISIONABLE_STATUSES.includes(job.status)
   const { selectionBox, clearSelection } = useTextSelection(paperRef, revisionable && !revisionRunning)
 
-  async function handleSubmitFeedback(feedback: string) {
+  async function handleSubmitFeedback(feedback: string, savePreference: boolean) {
     if (!jobId || !selectionBox) return
     try {
-      await createRevision(jobId, { selection: selectionBox.anchor, feedback })
+      await createRevision(jobId, {
+        selection: selectionBox.anchor,
+        feedback,
+        save_preference: savePreference,
+      })
       clearSelection()
       setRevisionRunning(true)
       setLogs((prev) => [...prev, { time: nowTime(), text: '修订反馈已提交' }])
@@ -508,6 +523,7 @@ export function JobDetail() {
           anchor={selectionBox.anchor}
           rect={selectionBox.rect}
           running={revisionRunning}
+          canSavePreference={!!job?.school_id && !!job?.course_id}
           onClose={clearSelection}
           onSubmit={handleSubmitFeedback}
         />
@@ -537,6 +553,7 @@ export function JobDetail() {
                     <Badge variant={meta.variant} pulse={r.status === 'running'}>
                       {meta.label}
                     </Badge>
+                    {r.preference_saved && <Badge variant="success">已沉淀偏好</Badge>}
                     <span className="ml-auto text-xs tabular-nums text-slate-400">
                       {formatDateTime(r.created_at)}
                     </span>
