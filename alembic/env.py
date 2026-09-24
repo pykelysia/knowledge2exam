@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import create_engine, pool
 
+from alembic import context
 from app.config import settings
 from app.models import Base  # noqa: F401 —— 导入以注册全部模型到 metadata
 
