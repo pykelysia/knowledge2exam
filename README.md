@@ -400,6 +400,7 @@ uv run alembic downgrade -1
 | `LLM_BASE_URL` | LLM 接口地址 | `http://localhost:8000/v1` |
 | `AGENT_MODEL` | 出卷 agent 模型 | `gpt-4o` |
 | `AGENT_TEMPERATURE` | 采样温度 | 0.7 |
+| `AGENT_REASONING_EFFORT` | 推理模型思考深度（`none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`），留空不发送；仅推理模型支持 | — |
 | `AGENT_RECURSION_LIMIT` | ReAct 循环最大步数 | 100 |
 | `AGENT_MAX_RETRIES` | 单题校验失败重试上限（超限放弃该题） | 3 |
 | `AGENT_MAX_RENDER_RETRIES` | 整卷渲染失败重试上限 | 3 |
