@@ -9,10 +9,14 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # jwt_secret 的内置开发默认值；生产环境（DEBUG_MODE=false）启动时校验必须覆盖
 DEFAULT_JWT_SECRET = "dev-secret-key-change-me-in-production-1234567890"
+
+# reasoning_effort 合法取值（OpenAI 兼容协议，仅推理模型支持，各模型支持的子集不同）
+REASONING_EFFORT_VALUES = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 
 class Settings(BaseSettings):
@@ -57,6 +61,23 @@ class Settings(BaseSettings):
     agent_temperature: float = 0.7
     agent_recursion_limit: int = 100  # ReAct 循环最大步数，防止失控
     agent_max_render_retries: int = 3  # 整卷 PDF 渲染失败重试上限
+    # 推理模型的思考深度（reasoning_effort）；None/留空则不发送该参数（非推理模型必须留空）
+    agent_reasoning_effort: str | None = None
+
+    @field_validator("agent_reasoning_effort", mode="before")
+    @classmethod
+    def _validate_reasoning_effort(cls, value: object) -> object:
+        if value is None:
+            return None
+        normalized = str(value).strip().lower()
+        if not normalized:
+            return None
+        if normalized not in REASONING_EFFORT_VALUES:
+            allowed = ", ".join(REASONING_EFFORT_VALUES)
+            raise ValueError(
+                f"agent_reasoning_effort 必须是 {allowed} 之一，当前值：{value!r}"
+            )
+        return normalized
 
     # Skill system（ReAct agent 的技能目录）
     skills_dir: Path = Path("./skills")
