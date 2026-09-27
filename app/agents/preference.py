@@ -2,7 +2,8 @@
 
 输入 = 本轮反馈与划选 + 该课程已有偏好条目；输出结构化决策
 ADD / UPDATE / DELETE / NOOP，由编排层执行落库。本模块不触数据库，
-LLM 调用失败直接抛出，由调用方降级为原文保存（不阻断修订轮）。
+结构化输出经恢复链路（手工提取 JSON + 重试一次）仍失败时抛
+PreferenceExtractionError，由调用方降级为原文保存（不阻断修订轮）。
 """
 
 from __future__ import annotations
@@ -15,11 +16,16 @@ from langchain_core.language_models import BaseChatModel
 from pydantic import BaseModel, Field
 
 from app.agents.prompts import load_prompt, render_prompt
+from app.agents.structured_output import structured_invoke
 
 logger = logging.getLogger(__name__)
 
 # 单条偏好规则的最大长度（字符），超出截断
 MAX_PREFERENCE_CHARS = 300
+
+
+class PreferenceExtractionError(RuntimeError):
+    """偏好提炼失败：结构化输出解析与恢复重试均未成功。"""
 
 
 class PreferenceDecision(BaseModel):
@@ -46,8 +52,9 @@ async def consolidate_preference(
 ) -> PreferenceDecision:
     """把本轮反馈与既有偏好条目合并为一条结构化决策。
 
-    existing 为该课程当前全部条目 (id, content)，旧→新。调用方负责
-    失败兜底（原文保存）；本函数成功即返回合法决策。
+    existing 为该课程当前全部条目 (id, content)，旧→新。恢复与重试
+    均失败时抛 PreferenceExtractionError，调用方负责失败兜底
+    （原文保存）；本函数成功即返回合法决策。
     """
     template = load_prompt("preference")
     existing_text = (
@@ -60,10 +67,11 @@ async def consolidate_preference(
         selection_text=selection_text or "（未划选）",
         existing_entries=existing_text,
     )
-    structured = model.with_structured_output(PreferenceDecision)
-    decision = await structured.ainvoke(prompt)
-    if not isinstance(decision, PreferenceDecision):
-        raise TypeError(f"偏好提炼输出类型异常: {type(decision).__name__}")
+    decision = await structured_invoke(
+        model, PreferenceDecision, prompt, label="偏好提炼"
+    )
+    if decision is None:
+        raise PreferenceExtractionError("偏好提炼失败：结构化输出解析与恢复重试均未成功")
     decision.content = decision.content.strip()[:MAX_PREFERENCE_CHARS]
     return decision
 

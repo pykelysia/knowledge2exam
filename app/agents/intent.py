@@ -6,14 +6,11 @@
 
 from __future__ import annotations
 
-import logging
-
 from langchain_core.language_models import BaseChatModel
 
 from app.agents.prompts import load_prompt, render_prompt
 from app.agents.schemas import ExamIntent
-
-logger = logging.getLogger(__name__)
+from app.agents.structured_output import structured_invoke
 
 
 async def extract_intent(
@@ -25,8 +22,9 @@ async def extract_intent(
 ) -> ExamIntent:
     """从重点清单与额外要求中提取结构化意图。
 
-    提取失败时返回宽松的默认意图（不阻断主流程），材料原文仍会
-    以工作区文件的形式供 agent 自行查阅。
+    结构化输出解析失败时依次降级：从原始回复中手工提取 JSON；
+    仍失败则带纠正指令重试一次；全部失败返回宽松的默认意图
+    （不阻断主流程，材料原文仍会以工作区文件的形式供 agent 自行查阅）。
     """
     template = load_prompt("intent")
     prompt = render_prompt(
@@ -35,13 +33,8 @@ async def extract_intent(
         keypoints=keypoint_list or "（未提供）",
         extra_requirements=extra_requirement or "（未提供）",
     )
-    try:
-        structured = model.with_structured_output(ExamIntent)
-        intent = await structured.ainvoke(prompt)
-    except Exception as exc:
-        logger.warning("意图提取失败，使用默认意图: %s", exc)
-        return _fallback_intent()
-    return intent if isinstance(intent, ExamIntent) else _fallback_intent()
+    intent = await structured_invoke(model, ExamIntent, prompt, label="意图提取")
+    return intent if intent is not None else _fallback_intent()
 
 
 def _fallback_intent() -> ExamIntent:
