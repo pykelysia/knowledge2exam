@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -41,11 +42,51 @@ class FakeStructured:
 class FakeIntentModel:
     """只实现 with_structured_output 的假模型（extract_intent 只用到它）。"""
 
-    def __init__(self, structured: FakeStructured):
+    def __init__(self, structured: FakeStructured | FakeRawStructured):
         self.structured = structured
+        self.bind_kwargs: dict[str, Any] = {}
 
-    def with_structured_output(self, schema: Any, **kwargs: Any) -> FakeStructured:
+    def with_structured_output(
+        self, schema: Any, **kwargs: Any
+    ) -> FakeStructured | FakeRawStructured:
+        self.bind_kwargs = dict(kwargs)
         return self.structured
+
+
+class FakeRawStructured:
+    """with_structured_output(include_raw=True) 风格的 stub：按序回放响应并记录 prompt。
+
+    responses 的元素为 include_raw 字典或 BaseException（调用 ainvoke 时抛出）。
+    """
+
+    def __init__(self, responses: list[dict[str, Any] | BaseException]):
+        self.responses = list(responses)
+        self.prompts: list[str] = []
+
+    async def ainvoke(self, prompt: str) -> dict[str, Any]:
+        self.prompts.append(prompt)
+        item = self.responses.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+
+def raw_response(content: Any) -> dict[str, Any]:
+    """构造解析失败的 include_raw 字典：parsed 为空，raw 携带模型原文。"""
+    return {
+        "raw": AIMessage(content=content),
+        "parsed": None,
+        "parsing_error": ValueError("Invalid JSON: expected value at line 1 column 1"),
+    }
+
+
+def parsed_response(intent: ExamIntent) -> dict[str, Any]:
+    """构造解析成功的 include_raw 字典。"""
+    return {
+        "raw": AIMessage(content="（结构化输出成功）"),
+        "parsed": intent,
+        "parsing_error": None,
+    }
 
 
 def fake_intent() -> ExamIntent:
@@ -597,6 +638,121 @@ class TestExtractIntent:
             FakeIntentModel(FakeStructured(intent=None)), duration_minutes=90
         )
         assert "意图提取" in intent.exam_scope
+
+    async def test_parse_error_recovers_fenced_json(self) -> None:
+        from app.agents.intent import extract_intent
+
+        payload = json.dumps(fake_intent().model_dump(), ensure_ascii=False)
+        fake = FakeRawStructured([raw_response(f"提取结果如下：\n```json\n{payload}\n```")])
+        intent = await extract_intent(FakeIntentModel(fake), duration_minutes=90)
+        assert intent.exam_scope == "高等数学期末"
+        assert intent.focus_points == ["导数", "极限"]
+        assert len(fake.prompts) == 1  # 手工恢复成功，不触发重试
+
+    async def test_parse_error_recovers_json_in_prose(self) -> None:
+        from app.agents.intent import extract_intent
+
+        payload = json.dumps(fake_intent().model_dump(), ensure_ascii=False)
+        # 前文混有干扰性花括号，应被跳过并恢复后面真正的 JSON
+        content = f"# 试卷生成意图提取\n\n格式应如 {{示例}} 所示。\n\n{payload}\n\n以上。"
+        fake = FakeRawStructured([raw_response(content)])
+        intent = await extract_intent(FakeIntentModel(fake), duration_minutes=90)
+        assert intent.exam_scope == "高等数学期末"
+
+    async def test_parse_error_recovers_from_block_content(self) -> None:
+        from app.agents.intent import extract_intent
+
+        payload = json.dumps(fake_intent().model_dump(), ensure_ascii=False)
+        # 分块 content（思考模型形态）：JSON 藏在 text 块中
+        fake = FakeRawStructured(
+            [raw_response([{"type": "text", "text": f"```json\n{payload}\n```"}])]
+        )
+        intent = await extract_intent(FakeIntentModel(fake), duration_minutes=90)
+        assert intent.exam_scope == "高等数学期末"
+
+    async def test_manual_parse_fail_then_retry_succeeds(self) -> None:
+        from app.agents.intent import extract_intent
+
+        fake = FakeRawStructured(
+            [
+                raw_response("# 试卷生成意图提取\n仅说明文字，不含 JSON。"),
+                parsed_response(fake_intent()),
+            ]
+        )
+        intent = await extract_intent(FakeIntentModel(fake), duration_minutes=90)
+        assert intent.exam_scope == "高等数学期末"
+        assert len(fake.prompts) == 2
+        assert "无法解析" in fake.prompts[1]
+        assert "JSON" in fake.prompts[1]
+
+    async def test_all_attempts_fail_falls_back(self) -> None:
+        from app.agents.intent import extract_intent
+
+        fake = FakeRawStructured(
+            [
+                raw_response("# 试卷生成意图提取\n纯 Markdown 输出。"),
+                raw_response("# 试卷生成意图提取\n仍是 Markdown 输出。"),
+            ]
+        )
+        intent = await extract_intent(FakeIntentModel(fake), duration_minutes=90)
+        assert "意图提取" in intent.exam_scope
+        assert len(fake.prompts) == 2
+
+    async def test_binds_function_calling_method(self) -> None:
+        """绑定方式必须是 function_calling：json_schema 会被 openai SDK 在
+        客户端解析，非 OpenAI 后端的 Markdown 输出在 llm 阶段抛错，
+        绕过 include_raw 只包解析器的 fallback 保护。"""
+        from app.agents.intent import extract_intent
+
+        model = FakeIntentModel(FakeStructured(intent=fake_intent()))
+        await extract_intent(model, duration_minutes=90)
+        assert model.bind_kwargs.get("method") == "function_calling"
+        assert model.bind_kwargs.get("include_raw") is True
+
+    async def test_sdk_validation_error_recovers_payload(self) -> None:
+        """复刻真实故障形态：SDK 客户端按 json_schema 解析抛 ValidationError，
+        errors()[0]["input"] 携带完整原文（围栏 JSON），应被兜底提取恢复。"""
+        from pydantic import ValidationError
+
+        from app.agents.intent import extract_intent
+
+        payload = json.dumps(fake_intent().model_dump(), ensure_ascii=False)
+        fenced = f"```json\n{payload}\n```"
+        with pytest.raises(ValidationError) as exc_info:
+            ExamIntent.model_validate_json(fenced)
+        fake = FakeRawStructured([exc_info.value])
+
+        intent = await extract_intent(FakeIntentModel(fake), duration_minutes=90)
+
+        assert intent.exam_scope == "高等数学期末"
+        assert len(fake.prompts) == 1  # 异常内恢复成功，不触发重试
+
+    async def test_parser_exception_recovers_llm_output(self) -> None:
+        from langchain_core.exceptions import OutputParserException
+
+        from app.agents.intent import extract_intent
+
+        payload = json.dumps(fake_intent().model_dump(), ensure_ascii=False)
+        error = OutputParserException("解析失败", llm_output=f"```json\n{payload}\n```")
+        fake = FakeRawStructured([error])
+
+        intent = await extract_intent(FakeIntentModel(fake), duration_minutes=90)
+
+        assert intent.exam_scope == "高等数学期末"
+        assert len(fake.prompts) == 1
+
+    async def test_api_error_without_payload_retries(self) -> None:
+        from app.agents.intent import extract_intent
+
+        fake = FakeRawStructured(
+            [RuntimeError("连接超时"), parsed_response(fake_intent())]
+        )
+
+        intent = await extract_intent(FakeIntentModel(fake), duration_minutes=90)
+
+        assert intent.exam_scope == "高等数学期末"
+        assert len(fake.prompts) == 2
+        assert "无法解析" in fake.prompts[1]
 
 
 # ---------------------------------------------------------------------------
