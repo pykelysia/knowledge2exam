@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core.enums import SourceType
@@ -28,7 +29,9 @@ class VectorStore:
     ) -> RetrievalResult:  # pragma: no cover
         raise NotImplementedError
 
-    async def upsert(self, chunks: list[Chunk]) -> None:  # pragma: no cover
+    async def upsert(
+        self, chunks: list[Chunk], *, session: AsyncSession | None = None
+    ) -> None:  # pragma: no cover
         raise NotImplementedError
 
     async def delete_by_resource(self, resource_id: uuid.UUID) -> None:  # pragma: no cover
@@ -43,7 +46,9 @@ class StubVectorStore(VectorStore):
     ) -> RetrievalResult:
         return RetrievalResult()
 
-    async def upsert(self, chunks: list[Chunk]) -> None:
+    async def upsert(
+        self, chunks: list[Chunk], *, session: AsyncSession | None = None
+    ) -> None:
         return None
 
     async def delete_by_resource(self, resource_id: uuid.UUID) -> None:
@@ -56,32 +61,46 @@ class PgVectorStore(VectorStore):
     def __init__(self, session_factory) -> None:
         self._session_factory = session_factory
 
-    async def upsert(self, chunks: list[Chunk]) -> None:
-        """批量写入 chunk 表（幂等：按 resource_id + chunk_index 去重）。"""
+    async def upsert(
+        self, chunks: list[Chunk], *, session: AsyncSession | None = None
+    ) -> None:
+        """批量写入 chunk 表（幂等：按 resource_id + chunk_index 去重）。
+
+        传入 session 时复用调用方事务（不 commit，由调用方控制提交/回滚），
+        保证 chunk 与同事务内未提交的 resource 行对外键可见；
+        不传时自开事务并在写入后提交。
+        """
         if not chunks:
             return
 
+        if session is not None:
+            await self._upsert_chunks(session, chunks)
+            return
+
         async with self._session_factory() as session:
-            for chunk in chunks:
-                # 使用 INSERT ... ON CONFLICT 实现幂等
-                stmt = insert(ChunkModel).values(
-                    resource_id=chunk.resource_id,
-                    upload_id=chunk.upload_id,
-                    user_id=chunk.user_id,
-                    school_id=chunk.school_id,
-                    course_id=chunk.course_id,
-                    source_type=chunk.source_type or SourceType.note,
-                    is_shared=chunk.is_shared,
-                    page=chunk.page,
-                    chunk_index=chunk.chunk_index,
-                    text=chunk.text,
-                    embedding=chunk.embedding,
-                )
-                stmt = stmt.on_conflict_do_nothing(
-                    index_elements=["resource_id", "chunk_index"]
-                )
-                await session.execute(stmt)
+            await self._upsert_chunks(session, chunks)
             await session.commit()
+
+    async def _upsert_chunks(self, session: AsyncSession, chunks: list[Chunk]) -> None:
+        for chunk in chunks:
+            # 使用 INSERT ... ON CONFLICT 实现幂等
+            stmt = insert(ChunkModel).values(
+                resource_id=chunk.resource_id,
+                upload_id=chunk.upload_id,
+                user_id=chunk.user_id,
+                school_id=chunk.school_id,
+                course_id=chunk.course_id,
+                source_type=chunk.source_type or SourceType.note,
+                is_shared=chunk.is_shared,
+                page=chunk.page,
+                chunk_index=chunk.chunk_index,
+                text=chunk.text,
+                embedding=chunk.embedding,
+            )
+            stmt = stmt.on_conflict_do_nothing(
+                index_elements=["resource_id", "chunk_index"]
+            )
+            await session.execute(stmt)
 
     async def search(
         self, query: str, filter_expr: dict[str, Any], top_k: int = 5

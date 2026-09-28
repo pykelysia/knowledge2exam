@@ -588,7 +588,9 @@ async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, An
                 embeddings = await embedder.embed([c.text for c in chunks])
                 _bind_chunk_metadata(chunks, embeddings, resource=resource, upload=upload, job=job)
 
-                await vector_store.upsert(chunks)
+                # 复用 db 事务：chunk 与本事务内 flush 过的 resource 行
+                # 在同一连接上对外键可见，失败时与 resource 一起回滚
+                await vector_store.upsert(chunks, session=db)
         else:
             # 文本类（manual_text / extra_requirement）：全文留存
             exclusive_texts.setdefault(upload.source_type.value, []).append(text)
