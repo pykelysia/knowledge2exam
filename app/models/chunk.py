@@ -14,6 +14,7 @@ from sqlalchemy import (
     Index,
     Integer,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -31,6 +32,8 @@ except ImportError:
 class Chunk(Base, TimestampMixin):
     __tablename__ = "chunk"
     __table_args__ = (
+        # upsert 幂等去重依赖的复合唯一约束（ON CONFLICT (resource_id, chunk_index)）
+        UniqueConstraint("resource_id", "chunk_index"),
         # 向量索引：HNSW + 余弦相似度
         Index(
             "idx_chunk_vector",

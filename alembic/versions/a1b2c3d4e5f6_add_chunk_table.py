@@ -9,6 +9,7 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import ENUM
 
 from app.config import settings
 from app.models.base import GUID
@@ -44,7 +45,9 @@ def upgrade() -> None:
     sa.Column('user_id', GUID(), nullable=False),
     sa.Column('school_id', GUID(), nullable=True),
     sa.Column('course_id', GUID(), nullable=True),
-    sa.Column('source_type', sa.Enum('book', 'lecture', 'note', 'keypoint_list', 'past_paper', 'manual_text', 'extra_requirement', name='source_type'), nullable=False),
+    # source_type 枚举由 initial schema 随 upload/resource 表创建，
+    # create_type=False 复用既有类型，避免重放时 DuplicateObject。
+    sa.Column('source_type', ENUM('book', 'lecture', 'note', 'keypoint_list', 'past_paper', 'manual_text', 'extra_requirement', name='source_type', create_type=False), nullable=False),
     sa.Column('is_shared', sa.Boolean(), nullable=False),
     sa.Column('page', sa.Integer(), nullable=True),
     sa.Column('chunk_index', sa.Integer(), nullable=False),
@@ -57,7 +60,8 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['school_id'], ['school.id'], name=op.f('fk_chunk_school_id_school')),
     sa.ForeignKeyConstraint(['upload_id'], ['upload.id'], name=op.f('fk_chunk_upload_id_upload')),
     sa.ForeignKeyConstraint(['user_id'], ['app_user.id'], name=op.f('fk_chunk_user_id_app_user')),
-    sa.PrimaryKeyConstraint('id', name=op.f('pk_chunk'))
+    sa.PrimaryKeyConstraint('id', name=op.f('pk_chunk')),
+    sa.UniqueConstraint('resource_id', 'chunk_index', name=op.f('uq_chunk_resource_id'))
     )
     op.create_index('idx_chunk_vector', 'chunk', ['embedding'], unique=False, postgresql_using='hnsw', postgresql_ops={'embedding': 'vector_cosine_ops'})
     op.create_index('idx_chunk_payload', 'chunk', ['school_id', 'course_id', 'source_type', 'is_shared'], unique=False)
