@@ -24,6 +24,9 @@ jobs:
         run: uv run ruff check app/ tests/
 
       - name: 测试（pytest）
+        env:
+          OPENAI_API_KEY: test
+          OPENAI_ADMIN_KEY: test
         run: uv run pytest -q
 
   frontend:
