@@ -43,12 +43,20 @@ export function Dashboard() {
 
   const refresh = useCallback(async () => {
     try {
-      const res = await listMyFiles()
-      setFiles(res.files)
+      // 出卷页需要全部可选文件：循环拉取个人库全部分页（上限 20 页防御）
+      const all: LibraryFile[] = []
+      let current = 1
+      for (;;) {
+        const res = await listMyFiles(current, 200)
+        all.push(...res.files)
+        if (all.length >= res.total || current >= 20) break
+        current += 1
+      }
+      setFiles(all)
       // 已删除/不可用的选中项自动移除
       setSelected((prev) => {
         const usable = new Set(
-          res.files.filter((f) => f.status === 'available').map((f) => f.upload_id),
+          all.filter((f) => f.status === 'available').map((f) => f.upload_id),
         )
         const next = new Set([...prev].filter((id) => usable.has(id)))
         return next.size === prev.size ? prev : next

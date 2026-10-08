@@ -108,6 +108,9 @@ export interface LibraryFile {
 
 export interface LibraryResponse {
   files: LibraryFile[]
+  total: number
+  page: number
+  page_size: number
 }
 
 export interface UploadPreview {

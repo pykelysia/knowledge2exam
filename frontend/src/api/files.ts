@@ -7,9 +7,14 @@ import type {
   UploadPreview,
 } from '@/api/types'
 
-/** 个人库：我的上传 + 公开池保存的引用（含失效原件标记）。 */
-export async function listMyFiles(): Promise<LibraryResponse> {
-  const { data } = await client.get<LibraryResponse>('/files/mine')
+/** 个人库：我的上传 + 公开池保存的引用（分页；含失效原件标记）。 */
+export async function listMyFiles(
+  page = 1,
+  pageSize = 50,
+): Promise<LibraryResponse> {
+  const { data } = await client.get<LibraryResponse>('/files/mine', {
+    params: { page, page_size: pageSize },
+  })
   return data
 }
 

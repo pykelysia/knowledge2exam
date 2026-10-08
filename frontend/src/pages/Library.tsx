@@ -3,6 +3,8 @@ import { Link } from 'react-router-dom'
 import {
   AlertCircle,
   Check,
+  ChevronLeft,
+  ChevronRight,
   Eye,
   FileText,
   Globe,
@@ -12,6 +14,7 @@ import {
   UserCheck,
   X,
 } from 'lucide-react'
+import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Select } from '@/components/ui/select'
 import { Card, CardContent, CardHeader, CardIcon, CardTitle } from '@/components/ui/card'
@@ -47,8 +50,12 @@ function nextId() {
   return `lib-${seq}`
 }
 
+const PAGE_SIZE = 50
+
 export function Library() {
   const [files, setFiles] = useState<LibraryFile[]>([])
+  const [total, setTotal] = useState(0)
+  const [page, setPage] = useState(1)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [previewId, setPreviewId] = useState<string | null>(null)
@@ -78,10 +85,16 @@ export function Library() {
     [],
   )
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (targetPage: number) => {
     try {
-      const res = await listMyFiles()
+      const res = await listMyFiles(targetPage, PAGE_SIZE)
       setFiles(res.files)
+      setTotal(res.total)
+      setPage(res.page)
+      // 当前页被删空时回退一页，避免停留在空页
+      if (res.files.length === 0 && res.page > 1) {
+        setPage(res.page - 1)
+      }
     } catch {
       /* 轮询失败静默，下次再试 */
     } finally {
@@ -96,16 +109,16 @@ export function Library() {
     listCourses()
       .then((res) => setCourses(res.courses))
       .catch(() => setCourses([]))
-    refresh()
+    refresh(1)
   }, [refresh])
 
-  // 有解析中的文件时轮询刷新
+  // 有解析中的文件时轮询刷新（保持当前页）
   const anyParsing = files.some((f) => f.status === 'parsing')
   useEffect(() => {
     if (!anyParsing) return
-    const timer = setInterval(refresh, 3000)
+    const timer = setInterval(() => void refresh(page), 3000)
     return () => clearInterval(timer)
-  }, [anyParsing, refresh])
+  }, [anyParsing, refresh, page])
 
   function updatePending(id: string, patch: Partial<PendingItem>) {
     setPending((prev) => prev.map((it) => (it.id === id ? { ...it, ...patch } : it)))
@@ -116,7 +129,8 @@ export function Library() {
     try {
       await uploadFile(item.file, item.sourceType, visibility, schoolId || null, courseId || null)
       updatePending(item.id, { uploading: false })
-      await refresh()
+      // 新文件按创建时间排最前，回第一页立即可见
+      await refresh(1)
       setTimeout(() => {
         setPending((prev) => prev.filter((x) => x.id !== item.id))
       }, 1500)
@@ -151,7 +165,7 @@ export function Library() {
   async function handleDelete(file: LibraryFile) {
     try {
       await deleteUpload(file.upload_id)
-      await refresh()
+      await refresh(page)
     } catch (err) {
       const apiErr = extractApiError(err)
       setError(apiErr ? errorMessage(apiErr.error_code) : '删除失败')
@@ -161,7 +175,7 @@ export function Library() {
   async function handleUnsave(file: LibraryFile) {
     try {
       await unsavePoolFile(file.upload_id)
-      await refresh()
+      await refresh(page)
     } catch {
       setError('取消保存失败，请稍后再试')
     }
@@ -170,7 +184,7 @@ export function Library() {
   async function handleVisibilityChange(file: LibraryFile, value: Visibility) {
     try {
       await patchUpload(file.upload_id, { visibility: value })
-      await refresh()
+      await refresh(page)
     } catch (err) {
       const apiErr = extractApiError(err)
       setError(apiErr ? errorMessage(apiErr.error_code) : '修改失败')
@@ -179,6 +193,7 @@ export function Library() {
 
   const ownFiles = useMemo(() => files.filter((f) => !f.imported), [files])
   const savedFiles = useMemo(() => files.filter((f) => f.imported), [files])
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
 
   const renderFileRow = (file: LibraryFile) => {
     const dead = file.status === 'deleted'
@@ -289,7 +304,7 @@ export function Library() {
           >
             公开池
           </Link>{' '}
-          保存他人共享的资料。
+          保存他人共享的资料。共 {total} 个文件。
         </p>
       </div>
 
@@ -447,7 +462,7 @@ export function Library() {
           <CardIcon>
             <Lock />
           </CardIcon>
-          <CardTitle>我的文件（{ownFiles.length}）</CardTitle>
+          <CardTitle>我的文件</CardTitle>
         </CardHeader>
         <CardContent>
           {loading ? (
@@ -468,7 +483,7 @@ export function Library() {
           <CardIcon>
             <Globe />
           </CardIcon>
-          <CardTitle>已保存的共享文件（{savedFiles.length}）</CardTitle>
+          <CardTitle>已保存的共享文件</CardTitle>
         </CardHeader>
         <CardContent>
           {savedFiles.length === 0 ? (
@@ -484,6 +499,33 @@ export function Library() {
           )}
         </CardContent>
       </Card>
+
+      {/* 分页 */}
+      {totalPages > 1 && (
+        <div className="flex items-center justify-center gap-3">
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            disabled={page <= 1}
+            onClick={() => void refresh(page - 1)}
+          >
+            <ChevronLeft className="h-3.5 w-3.5" /> 上一页
+          </Button>
+          <span className="text-[12.5px] tabular-nums text-slate-500">
+            {page} / {totalPages}
+          </span>
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            disabled={page >= totalPages}
+            onClick={() => void refresh(page + 1)}
+          >
+            下一页 <ChevronRight className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      )}
 
       {previewId && <FilePreview uploadId={previewId} onClose={() => setPreviewId(null)} />}
     </div>
