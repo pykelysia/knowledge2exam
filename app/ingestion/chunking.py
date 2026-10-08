@@ -16,17 +16,13 @@ _PAGE_MARKER_RE = re.compile(r"^--- Page (\d+) ---[ \t]*$", re.MULTILINE)
 @dataclass
 class Chunk:
     """切块结果。"""
+
     text: str
     page: int | None = None
     chunk_index: int = 0
-    resource_id: uuid.UUID | None = None
     upload_id: uuid.UUID | None = None
-    user_id: uuid.UUID | None = None
-    school_id: uuid.UUID | None = None
-    course_id: uuid.UUID | None = None
     source_type: SourceType | None = None
-    is_shared: bool = False
-    # 嵌入向量由预处理阶段计算后绑定；upsert 依赖此字段，缺失即入库失败
+    # 嵌入向量由解析管线计算后绑定；upsert 依赖此字段，缺失即入库失败
     embedding: list[float] | None = None
 
 

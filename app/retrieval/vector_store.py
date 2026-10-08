@@ -34,7 +34,7 @@ class VectorStore:
     ) -> None:  # pragma: no cover
         raise NotImplementedError
 
-    async def delete_by_resource(self, resource_id: uuid.UUID) -> None:  # pragma: no cover
+    async def delete_by_upload(self, upload_id: uuid.UUID) -> None:  # pragma: no cover
         raise NotImplementedError
 
 
@@ -51,7 +51,7 @@ class StubVectorStore(VectorStore):
     ) -> None:
         return None
 
-    async def delete_by_resource(self, resource_id: uuid.UUID) -> None:
+    async def delete_by_upload(self, upload_id: uuid.UUID) -> None:
         return None
 
 
@@ -64,10 +64,10 @@ class PgVectorStore(VectorStore):
     async def upsert(
         self, chunks: list[Chunk], *, session: AsyncSession | None = None
     ) -> None:
-        """批量写入 chunk 表（幂等：按 resource_id + chunk_index 去重）。
+        """批量写入 chunk 表（幂等：按 upload_id + chunk_index 去重）。
 
         传入 session 时复用调用方事务（不 commit，由调用方控制提交/回滚），
-        保证 chunk 与同事务内未提交的 resource 行对外键可见；
+        保证 chunk 与同事务内未提交的 upload 行对外键可见；
         不传时自开事务并在写入后提交。
         """
         if not chunks:
@@ -85,21 +85,14 @@ class PgVectorStore(VectorStore):
         for chunk in chunks:
             # 使用 INSERT ... ON CONFLICT 实现幂等
             stmt = insert(ChunkModel).values(
-                resource_id=chunk.resource_id,
                 upload_id=chunk.upload_id,
-                user_id=chunk.user_id,
-                school_id=chunk.school_id,
-                course_id=chunk.course_id,
                 source_type=chunk.source_type or SourceType.note,
-                is_shared=chunk.is_shared,
                 page=chunk.page,
                 chunk_index=chunk.chunk_index,
                 text=chunk.text,
                 embedding=chunk.embedding,
             )
-            stmt = stmt.on_conflict_do_nothing(
-                index_elements=["resource_id", "chunk_index"]
-            )
+            stmt = stmt.on_conflict_do_nothing(index_elements=["upload_id", "chunk_index"])
             await session.execute(stmt)
 
     async def search(
@@ -131,13 +124,8 @@ class PgVectorStore(VectorStore):
                 select(
                     ChunkModel.id,
                     ChunkModel.text,
-                    ChunkModel.resource_id,
                     ChunkModel.upload_id,
-                    ChunkModel.user_id,
-                    ChunkModel.school_id,
-                    ChunkModel.course_id,
                     ChunkModel.source_type,
-                    ChunkModel.is_shared,
                     ChunkModel.page,
                     ChunkModel.chunk_index,
                     similarity_col,
@@ -158,13 +146,8 @@ class PgVectorStore(VectorStore):
             chunks.append({
                 "id": str(row.id),
                 "text": row.text,
-                "resource_id": str(row.resource_id),
                 "upload_id": str(row.upload_id),
-                "user_id": str(row.user_id),
-                "school_id": str(row.school_id) if row.school_id else None,
-                "course_id": str(row.course_id) if row.course_id else None,
                 "source_type": source_type_val,
-                "is_shared": row.is_shared,
                 "page": row.page,
                 "chunk_index": row.chunk_index,
                 "similarity": float(row.similarity),
@@ -172,11 +155,11 @@ class PgVectorStore(VectorStore):
 
         return RetrievalResult(chunks=chunks)
 
-    async def delete_by_resource(self, resource_id: uuid.UUID) -> None:
-        """删除某资源的所有 chunk。"""
+    async def delete_by_upload(self, upload_id: uuid.UUID) -> None:
+        """删除某上传件的所有 chunk。"""
         async with self._session_factory() as session:
             from sqlalchemy import delete
-            stmt = delete(ChunkModel).where(ChunkModel.resource_id == resource_id)
+            stmt = delete(ChunkModel).where(ChunkModel.upload_id == upload_id)
             await session.execute(stmt)
             await session.commit()
 
@@ -210,7 +193,7 @@ class PgVectorStore(VectorStore):
                 sub_conditions = self._build_filter(sub_expr)
                 if sub_conditions:
                     # 分支内条件必须 AND 成组后作为单个 OR 操作数，
-                    # 展平会让 "本人上传且 book" 退化为 "本人上传或 book"
+                    # 展平会让分支组合语义退化
                     or_conditions.append(
                         and_(*sub_conditions) if len(sub_conditions) > 1 else sub_conditions[0]
                     )
@@ -220,14 +203,5 @@ class PgVectorStore(VectorStore):
         if "and" in expr:
             for sub_expr in expr["and"]:
                 conditions.extend(self._build_filter(sub_expr))
-
-        # user_scope：跨用户隔离不变量——个人内容限 user_id，共享内容不限但需 is_shared
-        if "user_scope" in expr:
-            scope_value = expr["user_scope"]
-            if isinstance(scope_value, str):
-                scope_value = uuid.UUID(scope_value)
-            conditions.append(
-                or_(ChunkModel.user_id == scope_value, ChunkModel.is_shared.is_(True))
-            )
 
         return conditions
