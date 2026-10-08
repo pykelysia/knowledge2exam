@@ -8,23 +8,31 @@
 ## 系统架构
 
 ```
-用户请求（上传资料 + 文本输入）
+用户上传文件（个人库，带可见性与学校/课程标签）
     │
     ▼
-文件预处理（解析 → OCR → 切块 → 向量嵌入）
-    │        └── 解析后文件 ──▶ 知识库（PostgreSQL + pgvector）
+上传即解析（异步：解析 → OCR → 切块 → 向量嵌入）
+    │        └── 解析产物 ──▶ 知识库（PostgreSQL + pgvector，一次解析全局复用）
+    │
+公开池（public / school 可见）── 语义+关键词检索 ──▶ 保存到个人库（引用级 file_import）
+    │
+    ▼
+创建任务（从个人库勾选文件；解析门禁 + 引用授权校验；标签自动推导）
+    │
+    ▼
+文件预处理（读现成解析产物 → 写 agent 工作区 materials/，不再二次解析）
     │                                 │
-    │ 文本输入（意图提取 → ExamIntent） │ search_knowledge 向量检索
+    │ 文本输入（意图提取 → ExamIntent） │ search_knowledge 白名单检索（仅选中文件）
     ▼                                 ▼
 Agent 工作（单个 ReAct agent + 工具循环，整卷直写 output/paper.md）
     │   todo_write / check_todo    出题计划与进度
-    │   search_knowledge           知识库向量检索
+    │   search_knowledge           知识库向量检索（任务选中文件白名单）
     │   load_skill                 加载出卷 / LaTeX 排版技能
     │   read_file / edit_file      工作区文件读写（试卷书写工具）
     ▼ render_paper
 PDF 渲染（Pandoc + XeLaTeX，缺依赖自动降级 md_only）
     ▼
-结果检验 ──成功──▶ 结果输出（output/paper.md / paper.pdf）
+结果检验 ──成功──▶ 结果输出（output/paper.md / output/paper.pdf）
     │失败
     ▼
 回到 Agent 工作（内容错误回传修正；重试超限降级）
@@ -57,16 +65,17 @@ app/
 ├── config.py                   # 配置加载（pydantic-settings）
 │
 ├── api/                        # ── 接入层 ──
-│   ├── auth.py                 # 注册 / 登录 / 刷新 / 登出（Cookie 双 JWT）
-│   ├── uploads.py              # 资料上传（文件 / 文本）与删除
+│   ├── auth.py                 # 注册 / 登录 / 刷新 / 登出 / PATCH me（Cookie 双 JWT）
+│   ├── uploads.py              # 上传（可见性/标签/异步解析）、软删除、个人库、预览
+│   ├── pool.py                 # 公开池浏览/语义检索/引用级保存
 │   ├── jobs.py                 # 任务创建 / 详情 / SSE 进度流 / 取消 / 删除
 │   ├── revisions.py            # 划选反馈修订提交与会话历史
 │   ├── artifacts.py            # paper.md（含进行中预览）/ paper.pdf 下载
-│   └── catalog.py              # 学校 / 课程列表
+│   └── catalog.py              # 学校 / 全局课程列表
 │
 ├── orchestration/              # ── 编排层 ──
 │   ├── state_machine.py        # 任务状态与流转合法性校验
-│   ├── stages.py               # 管线主体：预处理 → agent → 入库 → 终态
+│   ├── stages.py               # 管线主体：材料整理 → agent → 入库 → 终态
 │   ├── revision.py             # 修订编排：轮次创建、后台续跑、快照比对
 │   ├── integration.py          # ExamResult（蓝图）批量入库
 │   └── events.py               # 兼容 re-export（EventBus 本体在 core/events.py）
@@ -82,6 +91,7 @@ app/
 │   └── prompts/                # 提示词模板（system / revise_system / intent）
 │
 ├── ingestion/                  # ── 能力层：入 ──
+│   ├── pipeline.py             # 上传即解析管线（异步、幂等、启动恢复）
 │   ├── parsers/                # 格式解析器（pdf / docx / pptx / image / text）
 │   ├── ocr.py                  # 视觉 LLM OCR
 │   ├── chunking.py             # 文本切块
@@ -99,7 +109,7 @@ app/
 │   └── setup.py                # 渲染依赖自动安装
 │
 ├── models/                     # SQLAlchemy ORM（user / auth / catalog / upload /
-│                               # resource / chunk / job / plan / revision）
+│                               # library / chunk / job / plan / revision）
 ├── schemas/                    # Pydantic 请求 / 响应模型（auth / upload / job /
 │                               # revision / catalog / common）
 ├── core/                       # 基础设施（db / security / storage / events /
@@ -139,7 +149,8 @@ pending → preprocessing → generating → rendering → completed
 - 管线意外异常时任务定格 `failed`（`error_code=PIPELINE_FAILED`），并推送 `error` + `done` 事件
 - PDF 渲染失败不导致 `failed`：重试超限后任务以 `partially_completed` 结束，仅交付 paper.md，并携带 `RENDER_FAILED` warning
 - 某题实在无法产出时 agent 在蓝图中以「[已放弃] <原因>」标记该题并继续，不影响其余题目
-- 解析幂等：上传件在同一（学校、课程、共享）范围已解析过时，预处理直接复用既有解析产物与已入库向量，跳过解析/OCR/切块/嵌入；跨课程范围使用时重新解析，保证共享库归属正确
+- 解析已前移到上传阶段（`app/ingestion/pipeline.py`）：`preprocessing` 只把现成解析产物整理进 agent 工作区，任务不再重复解析；创建任务时校验全部文件 `parse_status=succeeded`（409 `UPLOAD_NOT_PARSED`）
+- 检索为白名单语义：`search_knowledge` 只在任务选中的 upload 集合 × book/lecture/note 范围内检索，白名单之外在 SQL 层面不可达
 
 ### 划选反馈修订
 
@@ -161,19 +172,20 @@ pending → preprocessing → generating → rendering → completed
 
 | 模块 | 路径 | 说明 |
 |------|------|------|
-| 认证 | `/api/v1/auth` | 注册 / 登录 / 刷新 / 登出（httpOnly Cookie 双 JWT） |
-| 上传 | `/api/v1/uploads` | 文件（multipart）或文本（JSON）上传；删除；同用户同类型同内容重复上传直接返回已有记录（`deduplicated=true`，不重复落盘） |
-| 任务 | `/api/v1/jobs` | 列表 / 创建 / 详情 / SSE 进度流 / 取消 / 删除 |
+| 认证 | `/api/v1/auth` | 注册（可选学校归属）/ 登录 / 刷新 / 登出 / PATCH me（httpOnly Cookie 双 JWT） |
+| 上传 | `/api/v1/uploads` | 文件（multipart，带可见性与学校/课程标签，上传即异步解析）或文本（JSON）上传；PATCH 改可见性/标签；软删除（被运行中任务引用时 409） |
+| 个人库 | `/api/v1/files/mine` | 我的上传 + 公开池保存的引用（含「文件已失效」标记）；`/files/{id}/preview` 文件预览 |
+| 公开池 | `/api/v1/pool/files` | 浏览 / 关键词∪语义检索（本校 + 全局可见，排除本人）；`/{id}/import` 引用级保存与取消 |
+| 任务 | `/api/v1/jobs` | 列表 / 创建（解析门禁 + 引用授权 + 标签推导）/ 详情 / SSE 进度流 / 取消 / 删除 |
 | 产物 | `/api/v1/jobs/{id}/paper.md`、`/paper.pdf` | 试卷产物（md 支持任务进行中渐进预览） |
 | 修订 | `/api/v1/jobs/{id}/revisions` | 划选反馈修订（POST 提交 / GET 会话历史） |
-| 学校/课程 | `/api/v1/schools` | 学校列表 / 课程列表（可选：同校同课程共享知识库） |
+| 学校/课程 | `/api/v1/schools`、`/api/v1/courses` | 学校列表 / 全局课程列表（互相独立的标签，课程跨校共用） |
 
 创建任务（`POST /api/v1/jobs`）参数：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `upload_ids` | UUID 列表 | 关联的上传资料 |
-| `school_id` / `course_id` | UUID，可选 | 学校与课程 |
+| `upload_ids` | UUID 列表 | 本次使用的上传件（本人上传或已保存引用；须全部解析完成） |
 | `duration_minutes` | int，5–300，默认 100 | 目标考试时长（分钟） |
 | `need_explanation` | bool，默认 false | 是否生成答案解析 |
 

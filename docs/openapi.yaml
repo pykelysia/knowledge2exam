@@ -22,13 +22,17 @@ tags:
   - name: Revisions
     description: 划选反馈修订（job 级会话记录）
   - name: Catalog
-    description: 学校与课程列表
+    description: 学校与课程列表（课程为全局实体，与学校解绑）
+  - name: Files
+    description: 个人库（我的上传 + 公开池保存的引用）与文件预览
+  - name: Pool
+    description: 公开池浏览、检索与引用级保存
 paths:
   /auth/register:
     post:
       tags: [Auth]
       operationId: register
-      summary: 注册账号
+      summary: 注册账号（可选学校归属）
       security: []
       requestBody:
         required: true
@@ -45,6 +49,26 @@ paths:
                 $ref: '#/components/schemas/UserResponse'
         '409':
           $ref: '#/components/responses/UserExists'
+  /auth/me:
+    patch:
+      tags: [Auth]
+      operationId: updateMe
+      summary: 修改个人资料（学校归属；显式 null 清除）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserUpdateRequest'
+      responses:
+        '200':
+          description: 已更新，返回最新用户信息
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /auth/login:
     post:
       tags: [Auth]
@@ -96,10 +120,12 @@ paths:
     post:
       tags: [Uploads]
       operationId: createUpload
-      summary: 上传单个文件或提交文本
+      summary: 上传单个文件或提交文本（上传即异步解析）
       description: |
         两种载荷互斥：文件上传用 `multipart/form-data`，文本提交用 `application/json`。
-        `manual_text` 与 `extra_requirement` 不接受 `shareable` 字段，传入即 400。
+        文件上传登记后立即异步解析进知识库（parse_status: pending → parsing → succeeded/failed），
+        个人库轮询 `GET /files/mine` 获取进度；解析完成后可在任意任务中复用，不再二次解析。
+        `manual_text` 与 `extra_requirement` 不接受 `visibility` 字段，传入即 400。
       requestBody:
         required: true
         content:
@@ -111,19 +137,28 @@ paths:
                 file:
                   type: string
                   format: binary
-                  description: 文件本体。支持 docx/doc/pptx/ppt/pdf/md/txt/jpg/jpeg/png/webp/bmp
+                  description: 文件本体。支持 docx/pptx/pdf/md/txt/jpg/jpeg/png/webp/bmp
                 source_type:
                   $ref: '#/components/schemas/SourceTypeFile'
-                shareable:
-                  type: boolean
-                  default: false
-                  description: 是否愿意共享入知识库。仅文件类可用
+                visibility:
+                  type: string
+                  enum: [private, school, public]
+                  default: private
+                  description: 可见性。private 仅本人；school 同校可见（必须同时提供 school_id）；public 全局公开池
+                school_id:
+                  type: string
+                  format: uuid
+                  description: 学校标签（可选；visibility=school 时必填）
+                course_id:
+                  type: string
+                  format: uuid
+                  description: 课程标签（可选，课程为全局实体）
           application/json:
             schema:
               $ref: '#/components/schemas/TextUploadCreate'
       responses:
         '201':
-          description: 上传或文本提交已受理（解析在任务预处理阶段执行，本接口不返回预览）
+          description: 上传已受理（文件类解析异步进行，文本类即时完成）
           content:
             application/json:
               schema:
@@ -133,19 +168,81 @@ paths:
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
   /uploads/{upload_id}:
+    patch:
+      tags: [Uploads]
+      operationId: updateUpload
+      summary: 修改可见性 / 标签（仅 owner）
+      description: 未提供的字段保持不变，显式 null 清除标签。本校可见必须带学校标签。
+      parameters:
+        - $ref: '#/components/parameters/UploadId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UploadUpdateRequest'
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Upload'
+        '404':
+          $ref: '#/components/responses/NotFound'
     delete:
       tags: [Uploads]
       operationId: deleteUpload
-      summary: 删除尚未用于任务的上传件
+      summary: 软删除上传件
+      description: |
+        置 `deleted_at` 并清理存储与向量数据；仅当被非终态任务引用时拒绝（409）。
+        已被他人保存引用的文件仍可删除——引用侧个人库条目保留并标记「文件已失效」。
       parameters:
         - $ref: '#/components/parameters/UploadId'
       responses:
         '204':
-          description: 已删除
+          description: 已删除（幂等）
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/UploadInUse'
+  /files/mine:
+    get:
+      tags: [Files]
+      operationId: listMyFiles
+      summary: 个人库列表
+      description: |
+        我的上传（活跃、非任务输入文本类）∪ 公开池保存的引用（file_import，含原件
+        已删除的行）。`status`：available / parsing / failed / deleted（deleted 即「文件已失效」）。
+        前端在存在 parsing 条目时轮询本接口刷新解析进度。
+      responses:
+        '200':
+          description: 个人库条目
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LibraryResponse'
+  /files/{upload_id}/preview:
+    get:
+      tags: [Files]
+      operationId: previewFile
+      summary: 文件预览（个人库与公开池共用）
+      description: |
+        权限 = owner 或已保存引用或池内可见（public，或 school 且与观看者同校）。
+        返回解析产物文本，超过 max_preview_chars（默认 20000 字符）截断并置 truncated。
+      parameters:
+        - $ref: '#/components/parameters/UploadId'
+      responses:
+        '200':
+          description: 预览内容
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadPreview'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 文件尚未解析完成或解析失败（UPLOAD_NOT_PARSED）
   /jobs:
     get:
       tags: [Jobs]
@@ -164,7 +261,10 @@ paths:
       tags: [Jobs]
       operationId: createJob
       summary: 创建生成任务
-      description: 立即返回 `job_id`（202），生成异步进行。
+      description: |
+        立即返回 `job_id`（202），生成异步进行。上传件须为本人上传或已保存引用
+        （file_import），且全部 `parse_status=succeeded`（否则 409 UPLOAD_NOT_PARSED）。
+        学校/课程标签从所选文件自动推导（全部同校且同课时生效，用于课程偏好作用域）。
       requestBody:
         required: true
         content:
@@ -180,6 +280,8 @@ paths:
                 $ref: '#/components/schemas/JobAccepted'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '409':
+          description: 存在未解析完成的文件（UPLOAD_NOT_PARSED）
   /jobs/{job_id}:
     get:
       tags: [Jobs]
@@ -372,20 +474,13 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SchoolsResponse'
-  /schools/{school_id}/courses:
+  /courses:
     get:
       tags: [Catalog]
       operationId: listCourses
-      summary: 某学校的课程列表
+      summary: 全局课程列表
+      description: 课程为全局实体（与学校解绑），附每课程公开池可见文件数。
       security: []
-      parameters:
-        - name: school_id
-          in: path
-          required: true
-          description: 学校 ID
-          schema:
-            type: string
-            format: uuid
       responses:
         '200':
           description: 课程列表
@@ -393,8 +488,71 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/CoursesResponse'
+  /pool/files:
+    get:
+      tags: [Pool]
+      operationId: listPoolFiles
+      summary: 公开池浏览 / 检索
+      description: |
+        可见谓词：`deleted_at IS NULL AND (public OR (school AND 文件学校 == 观看者学校))`，
+        排除本人上传。`q` = 文件名/学校/课程关键词 ∪ 内容语义检索（embedding 失败时降级为关键词）。
+      parameters:
+        - name: q
+          in: query
+          schema:
+            type: string
+          description: 关键词或语义查询
+        - name: school_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: course_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: source_type
+          in: query
+          schema:
+            $ref: '#/components/schemas/SourceTypeFile'
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: page_size
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200':
+          description: 池内文件（含 is_saved 与 semantic_score）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PoolFilesResponse'
+  /pool/files/{upload_id}/import:
+    post:
+      tags: [Pool]
+      operationId: savePoolFile
+      summary: 保存到个人库（引用级，不复制数据；幂等）
+      description: 仅池内可见且非本人的文件可保存；授权落库即持久，原件转私不影响已保存引用。
+      parameters:
+        - $ref: '#/components/parameters/UploadId'
+      responses:
+        '200':
+          description: 已保存
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImportAccepted'
+        '403':
+          description: 该文件当前不可保存（IMPORT_NOT_ALLOWED）
         '404':
           $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Pool]
+      operationId: unsavePoolFile
+      summary: 取消保存（移除个人库引用；幂等）
+      parameters:
+        - $ref: '#/components/parameters/UploadId'
+      responses:
+        '204':
+          description: 已取消保存
 components:
   securitySchemes:
     cookieAuth:
@@ -500,6 +658,11 @@ components:
           minLength: 8
           maxLength: 72
           description: 按字节计最长 72（bcrypt 限制），中文等多字节字符需注意
+        school_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: 学校归属（可选），决定「本校可见」文件的观看资格
     LoginRequest:
       type: object
       required: [password]
@@ -528,6 +691,11 @@ components:
           format: email
         username:
           type: string
+        school_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: 学校归属（本校可见资格）；未设置为 null
     UserResponse:
       type: object
       required: [user]
@@ -545,7 +713,7 @@ components:
     TextUploadCreate:
       type: object
       required: [source_type, raw_text]
-      description: 手动输入文本提交。`source_type` 仅限 manual_text / extra_requirement，不接受 `shareable`。
+      description: 手动输入文本提交。`source_type` 仅限 manual_text / extra_requirement，不接受 `visibility`。
       properties:
         source_type:
           type: string
@@ -573,12 +741,136 @@ components:
           type: integer
           nullable: true
           description: 文件大小，手动输入时为 null
-        shareable:
-          type: boolean
-          description: 是否愿意共享入知识库；手动输入恒为 false
+        visibility:
+          type: string
+          enum: [private, school, public]
+          description: 可见性；手动输入恒为 private
+        parse_status:
+          type: string
+          enum: [pending, parsing, succeeded, failed]
+          description: 解析状态；文本类创建即 succeeded，文件类异步收敛
+    UploadUpdateRequest:
+      type: object
+      description: 修改可见性 / 标签；未提供的字段保持不变，显式 null 清除标签
+      properties:
+        visibility:
+          type: string
+          enum: [private, school, public]
+        school_id:
+          type: string
+          format: uuid
+          nullable: true
+        course_id:
+          type: string
+          format: uuid
+          nullable: true
+    FileOwner:
+      type: object
+      required: [user_id, username]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        username:
+          type: string
+    LibraryFile:
+      type: object
+      description: 个人库条目：我的上传或从公开池保存的引用
+      required: [upload_id, source_type, visibility, parse_status, created_at, owner, imported, status]
+      properties:
+        upload_id: { type: string, format: uuid }
+        source_type: { $ref: '#/components/schemas/SourceType' }
+        filename: { type: string, nullable: true }
+        size_bytes: { type: integer, nullable: true }
+        visibility: { type: string, enum: [private, school, public] }
+        school_id: { type: string, format: uuid, nullable: true }
+        course_id: { type: string, format: uuid, nullable: true }
+        char_count: { type: integer, nullable: true }
+        parse_status: { type: string, enum: [pending, parsing, succeeded, failed] }
+        parse_error: { type: string, nullable: true }
+        parse_warnings:
+          type: array
+          items:
+            type: object
+            properties:
+              code: { type: string }
+              message: { type: string }
+        created_at: { type: string, format: date-time }
+        owner: { $ref: '#/components/schemas/FileOwner' }
+        imported: { type: boolean, description: 是否为公开池保存的引用 }
+        imported_at: { type: string, format: date-time, nullable: true }
+        status:
+          type: string
+          enum: [available, parsing, failed, deleted]
+          description: deleted 即「文件已失效」（原件已被删除）
+    LibraryResponse:
+      type: object
+      required: [files]
+      properties:
+        files:
+          type: array
+          items:
+            $ref: '#/components/schemas/LibraryFile'
+    UploadPreview:
+      type: object
+      description: 文件预览（基于解析产物文本）
+      required: [upload_id, source_type, visibility, text, truncated]
+      properties:
+        upload_id: { type: string, format: uuid }
+        filename: { type: string, nullable: true }
+        source_type: { $ref: '#/components/schemas/SourceType' }
+        visibility: { type: string, enum: [private, school, public] }
+        school_id: { type: string, format: uuid, nullable: true }
+        course_id: { type: string, format: uuid, nullable: true }
+        school_name: { type: string, nullable: true }
+        course_name: { type: string, nullable: true }
+        char_count: { type: integer, nullable: true }
+        text: { type: string, description: 解析文本（截断至 max_preview_chars） }
+        truncated: { type: boolean }
+    PoolFile:
+      type: object
+      description: 公开池条目（本校 + 全局可见，排除本人上传）
+      required: [upload_id, source_type, visibility, created_at, owner, is_saved]
+      properties:
+        upload_id: { type: string, format: uuid }
+        source_type: { $ref: '#/components/schemas/SourceType' }
+        filename: { type: string, nullable: true }
+        size_bytes: { type: integer, nullable: true }
+        visibility: { type: string, enum: [school, public] }
+        school_id: { type: string, format: uuid, nullable: true }
+        course_id: { type: string, format: uuid, nullable: true }
+        school_name: { type: string, nullable: true }
+        course_name: { type: string, nullable: true }
+        char_count: { type: integer, nullable: true }
+        created_at: { type: string, format: date-time }
+        owner: { $ref: '#/components/schemas/FileOwner' }
+        is_saved: { type: boolean, description: 是否已保存到个人库 }
+        semantic_score: { type: number, nullable: true, description: 语义检索得分（仅 q 语义命中时） }
+    PoolFilesResponse:
+      type: object
+      required: [files, total, page, page_size]
+      properties:
+        files:
+          type: array
+          items:
+            $ref: '#/components/schemas/PoolFile'
+        total: { type: integer }
+        page: { type: integer }
+        page_size: { type: integer }
+    ImportAccepted:
+      type: object
+      required: [saved, upload_id]
+      properties:
+        saved: { type: boolean }
+        upload_id: { type: string, format: uuid }
+    UserUpdateRequest:
+      type: object
+      description: 修改个人资料；显式 null 清除学校归属
+      properties:
+        school_id: { type: string, format: uuid, nullable: true }
     JobCreate:
       type: object
-      description: 创建任务请求
+      description: 创建任务请求。学校/课程标签从所选文件自动推导（全部同校且同课时生效）
       properties:
         upload_ids:
           type: array
@@ -586,17 +878,7 @@ components:
             type: string
             format: uuid
           default: []
-          description: 本次使用的上传件；为空且无任何文本类上传件时返回 400 INPUT_EMPTY
-        school_id:
-          type: string
-          format: uuid
-          nullable: true
-          description: 有共享项或需读共享库时必填
-        course_id:
-          type: string
-          format: uuid
-          nullable: true
-          description: 同上
+          description: 本次使用的上传件（本人上传或已保存引用）；为空时返回 400 INPUT_EMPTY；须全部解析完成
         duration_minutes:
           type: integer
           minimum: 5
@@ -863,9 +1145,9 @@ components:
           format: uuid
         name:
           type: string
-        shared_resource_count:
+        pool_file_count:
           type: integer
-          description: 该课程共享库资源数，供用户判断是否有内容可用
+          description: 该课程在公开池（本校 + 全局可见）中的活跃文件数
     ErrorResponse:
       type: object
       required: [error_code, message]
@@ -893,7 +1175,10 @@ components:
         - INVALID_DURATION
         - JOB_NOT_FOUND
         - SCHOOL_NOT_FOUND
+        - COURSE_NOT_FOUND
         - UPLOAD_IN_USE
+        - UPLOAD_NOT_PARSED
+        - IMPORT_NOT_ALLOWED
         - JOB_NOT_READY
         - JOB_ALREADY_FINISHED
         - JOB_NOT_FINISHED

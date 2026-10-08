@@ -99,9 +99,8 @@ class TestBuildFilter:
                     {"eq": {"source_type": "book"}},
                 ]},
                 {"and": [
-                    {"eq": {"school_id": "s1"}},
-                    {"eq": {"course_id": "c1"}},
-                    {"eq": {"is_shared": True}},
+                    {"eq": {"source_type": "note"}},
+                    {"eq": {"page": 3}},
                 ]},
             ],
         }
@@ -119,7 +118,7 @@ class TestBuildFilter:
         sql = str(or_group.compile())
         assert "upload_id IN" in sql
         assert "source_type" in sql
-        assert "is_shared" in sql
+        assert "page" in sql
 
     def test_flat_filters_still_supported(self) -> None:
         """扁平 eq/in 过滤行为不变。"""
@@ -136,19 +135,15 @@ class TestBuildFilter:
         assert "upload_id IN" in sql
 
     def test_user_scope_appended_as_condition(self) -> None:
-        """user_scope 键编译为 (user_id = ? OR is_shared) 隔离条件。"""
-        uid = uuid.uuid4()
+        """user_scope 已随白名单化删除：未知键被忽略，不产生条件。"""
         expr: dict[str, Any] = {
-            "user_scope": uid,
+            "user_scope": uuid.uuid4(),
             "or": [{"eq": {"source_type": "book"}}],
         }
 
         conditions = self.store._build_filter(expr)  # noqa: SLF001
 
-        assert len(conditions) == 2
-        scope_sql = str(conditions[1].compile())
-        assert "user_id" in scope_sql
-        assert "is_shared" in scope_sql
+        assert len(conditions) == 1
 
     def test_user_scope_accepts_string_uuid(self) -> None:
         expr: dict[str, Any] = {
@@ -158,15 +153,15 @@ class TestBuildFilter:
 
         conditions = self.store._build_filter(expr)  # noqa: SLF001
 
-        assert len(conditions) == 2
+        assert len(conditions) == 1
 
     def test_combined_and_semantics(self) -> None:
-        """and 与 or 嵌套组合：and_(or_base, scope) 双重保护结构成立。"""
+        """and 与 or 嵌套组合：and_(or_base, page) 双重条件结构成立。"""
         expr: dict[str, Any] = {
             "and": [
                 {"or": [
-                    {"eq": {"user_id": "u1"}},
-                    {"eq": {"is_shared": True}},
+                    {"in": {"upload_id": ["u1", "u2"]}},
+                    {"eq": {"page": 5}},
                 ]},
                 {"or": [{"eq": {"source_type": "book"}}]},
             ],

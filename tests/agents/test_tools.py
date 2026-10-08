@@ -217,35 +217,21 @@ class TestSearchKnowledge:
 
 
 class TestKnowledgeFilter:
-    @staticmethod
-    def _base(expr: dict) -> dict:
-        """拆出基础过滤：user_id 存在时结构为 {"and": [base, user_scope]}。"""
-        if "and" in expr and isinstance(expr["and"], list) and len(expr["and"]) == 2:
-            return expr["and"][0]
-        return expr
-
-    def test_uploads_only(self, tmp_path: Path) -> None:
+    def test_whitelist_only(self, tmp_path: Path) -> None:
+        """检索条件 = 选中上传件白名单 × book/lecture/note。"""
         from app.agents.tools import _knowledge_filter
 
         u1, u2 = uuid4(), uuid4()
         expr = _knowledge_filter(make_ctx(tmp_path, upload_ids=[u1, u2]))
-        assert expr is not None
-        base = self._base(expr)
-        assert len(base["or"]) == 3  # book/lecture/note 各一分支
-        upload_branch = base["or"][0]["and"]
-        assert {"in": {"upload_id": [str(u1), str(u2)]}} in upload_branch
+        assert expr == {
+            "and": [
+                {"in": {"upload_id": [str(u1), str(u2)]}},
+                {"in": {"source_type": ["book", "lecture", "note"]}},
+            ]
+        }
 
-    def test_school_course_only(self, tmp_path: Path) -> None:
-        from app.agents.tools import _knowledge_filter
-
-        school, course = uuid4(), uuid4()
-        expr = _knowledge_filter(make_ctx(tmp_path, school_id=school, course_id=course))
-        base = self._base(expr)
-        assert "or" in base  # 3 种 source_type × 1 分支
-        assert len(base["or"]) == 3
-
-    def test_combined_produces_or(self, tmp_path: Path) -> None:
-        """有上传件 + 学校课程：每个 source_type 一个 additive 分支（内含 or）。"""
+    def test_scope_tags_do_not_widen_retrieval(self, tmp_path: Path) -> None:
+        """学校/课程上下文不再扩展检索面：白名单之外的内容不可达。"""
         from app.agents.tools import _knowledge_filter
 
         expr = _knowledge_filter(
@@ -257,47 +243,23 @@ class TestKnowledgeFilter:
             )
         )
         assert expr is not None
-        base = self._base(expr)
-        assert len(base["or"]) == 3  # book/lecture/note 各一个 additive 分支
-        for branch in base["or"]:
-            # additive：本次上传 OR 同校同课程共享库
-            assert "or" in branch
-            assert len(branch["or"]) == 2
-
-    def test_shared_flag_present(self, tmp_path: Path) -> None:
-        from app.agents.tools import _knowledge_filter
-
-        expr = _knowledge_filter(make_ctx(tmp_path, school_id=uuid4(), course_id=uuid4()))
-        base = self._base(expr)
-        branch = base["or"][0]["and"]
-        assert {"eq": {"is_shared": True}} in branch
-
-    def test_user_scope_guard_wraps_base(self, tmp_path: Path) -> None:
-        """有 user_id 时必须包一层跨用户隔离：本人 OR 显式共享。"""
-        from app.agents.tools import _knowledge_filter
-
-        ctx = make_ctx(tmp_path, upload_ids=[uuid4()])
-        expr = _knowledge_filter(ctx)
-        assert "and" in expr and len(expr["and"]) == 2
-        scope = expr["and"][1]
-        assert scope == {
-            "or": [
-                {"eq": {"user_id": str(ctx.user_id)}},
-                {"eq": {"is_shared": True}},
-            ],
-        }
-
-    def test_no_user_id_skips_guard(self, tmp_path: Path) -> None:
-        from app.agents.tools import _knowledge_filter
-
-        expr = _knowledge_filter(make_ctx(tmp_path, upload_ids=[uuid4()], user_id=None))
-        assert "or" in expr
-        assert "and" not in expr
+        assert len(expr["and"]) == 2
+        flattened = repr(expr)
+        for legacy in ("school_id", "course_id", "is_shared", "user_id"):
+            assert legacy not in flattened
 
     def test_no_uploads_no_scope_returns_none(self, tmp_path: Path) -> None:
         from app.agents.tools import _knowledge_filter
 
         assert _knowledge_filter(make_ctx(tmp_path, user_id=None)) is None
+
+    def test_scope_without_uploads_returns_none(self, tmp_path: Path) -> None:
+        from app.agents.tools import _knowledge_filter
+
+        expr = _knowledge_filter(
+            make_ctx(tmp_path, school_id=uuid4(), course_id=uuid4())
+        )
+        assert expr is None, "只有学校/课程而没有选中文件时不得检索共享内容"
 
 
 class TestLoadSkill:
