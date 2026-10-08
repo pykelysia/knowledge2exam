@@ -12,10 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core.db import get_db
+from app.core.deps import get_current_user
 from app.core.exceptions import (
     InvalidCredentials,
     RefreshInvalid,
     RefreshReuseDetected,
+    SchoolNotFound,
     UserExists,
 )
 from app.core.security import (
@@ -27,19 +29,26 @@ from app.core.security import (
     verify_password,
 )
 from app.models.auth import RefreshToken
+from app.models.catalog import School
 from app.models.user import AppUser
 from app.schemas.auth import (
     LoginRequest,
     RegisterRequest,
     User,
     UserResponse,
+    UserUpdateRequest,
 )
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
 
 def _user_to_schema(user: AppUser) -> User:
-    return User(user_id=user.id, email=user.email, username=user.username)
+    return User(
+        user_id=user.id,
+        email=user.email,
+        username=user.username,
+        school_id=user.school_id,
+    )
 
 
 def _set_auth_cookies(response: Response, access_token: str, refresh_token: str) -> None:
@@ -82,10 +91,14 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
     if existing is not None:
         raise UserExists()
 
+    if payload.school_id is not None and await db.get(School, payload.school_id) is None:
+        raise SchoolNotFound()
+
     user = AppUser(
         email=payload.email,
         username=payload.username,
         password_hash=hash_password(payload.password),
+        school_id=payload.school_id,
     )
     db.add(user)
     try:
@@ -95,6 +108,23 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
         await db.rollback()
         raise UserExists() from exc
     await db.refresh(user)
+    return UserResponse(user=_user_to_schema(user))
+
+
+@router.patch("/me", response_model=UserResponse)
+async def update_me(
+    payload: UserUpdateRequest,
+    user: AppUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> UserResponse:
+    """修改个人资料（当前支持学校归属；显式 null 清除）。"""
+    if "school_id" in payload.model_fields_set:
+        if payload.school_id is not None:
+            if await db.get(School, payload.school_id) is None:
+                raise SchoolNotFound()
+        user.school_id = payload.school_id
+        await db.commit()
+        await db.refresh(user)
     return UserResponse(user=_user_to_schema(user))
 
 

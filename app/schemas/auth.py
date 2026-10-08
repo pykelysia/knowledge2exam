@@ -20,11 +20,19 @@ class RegisterRequest(BaseModel):
     email: EmailStr
     username: str = Field(min_length=1, max_length=32)
     password: str = Field(min_length=8)
+    # 学校归属（可选）：决定「本校可见」文件的观看资格
+    school_id: uuid.UUID | None = None
 
     @model_validator(mode="after")
     def _check_password(self) -> RegisterRequest:
         _validate_password_bytes(self.password)
         return self
+
+
+class UserUpdateRequest(BaseModel):
+    """修改个人资料（显式 null 表示清除学校归属）。"""
+
+    school_id: uuid.UUID | None = None
 
 
 class LoginRequest(BaseModel):
@@ -53,6 +61,7 @@ class User(BaseModel):
     user_id: uuid.UUID
     email: EmailStr
     username: str
+    school_id: uuid.UUID | None = None
 
 
 class UserResponse(BaseModel):
