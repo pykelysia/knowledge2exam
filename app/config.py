@@ -47,6 +47,8 @@ class Settings(BaseSettings):
 
     # 上传限制
     max_upload_size_bytes: int = 50 * 1024 * 1024  # 50 MB
+    # 文件预览返回的解析文本截断长度（字符数）
+    max_preview_chars: int = 20_000
 
     # CORS
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]

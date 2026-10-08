@@ -23,7 +23,10 @@ class ErrorCode(StrEnum):
     # 资源与任务
     JOB_NOT_FOUND = "JOB_NOT_FOUND"
     SCHOOL_NOT_FOUND = "SCHOOL_NOT_FOUND"
+    COURSE_NOT_FOUND = "COURSE_NOT_FOUND"
     UPLOAD_IN_USE = "UPLOAD_IN_USE"
+    UPLOAD_NOT_PARSED = "UPLOAD_NOT_PARSED"
+    IMPORT_NOT_ALLOWED = "IMPORT_NOT_ALLOWED"
     JOB_NOT_READY = "JOB_NOT_READY"
     JOB_ALREADY_FINISHED = "JOB_ALREADY_FINISHED"
     JOB_NOT_FINISHED = "JOB_NOT_FINISHED"
@@ -63,7 +66,10 @@ _ERROR_CODE_HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.INVALID_DURATION: 400,
     ErrorCode.JOB_NOT_FOUND: 404,
     ErrorCode.SCHOOL_NOT_FOUND: 404,
+    ErrorCode.COURSE_NOT_FOUND: 404,
     ErrorCode.UPLOAD_IN_USE: 409,
+    ErrorCode.UPLOAD_NOT_PARSED: 409,
+    ErrorCode.IMPORT_NOT_ALLOWED: 403,
     ErrorCode.JOB_NOT_READY: 409,
     ErrorCode.JOB_ALREADY_FINISHED: 409,
     ErrorCode.JOB_NOT_FINISHED: 409,
@@ -153,6 +159,18 @@ class SchoolNotFound(AppException):
         super().__init__(ErrorCode.SCHOOL_NOT_FOUND, "学校不存在")
 
 
+class ShareScopeRequired(AppException):
+    def __init__(self, message: str | None = None) -> None:
+        super().__init__(
+            ErrorCode.SHARE_SCOPE_REQUIRED, message or "本校可见需要指定学校"
+        )
+
+
+class CourseNotFound(AppException):
+    def __init__(self) -> None:
+        super().__init__(ErrorCode.COURSE_NOT_FOUND, "课程不存在")
+
+
 class UploadNotFound(AppException):
     def __init__(self) -> None:
         super().__init__(ErrorCode.JOB_NOT_FOUND, "上传件不存在或无权访问")
@@ -161,6 +179,18 @@ class UploadNotFound(AppException):
 class UploadInUse(AppException):
     def __init__(self) -> None:
         super().__init__(ErrorCode.UPLOAD_IN_USE, "上传件已被任务引用，不可删除")
+
+
+class UploadNotParsed(AppException):
+    def __init__(self, message: str | None = None) -> None:
+        super().__init__(
+            ErrorCode.UPLOAD_NOT_PARSED, message or "文件尚未解析完成或解析失败"
+        )
+
+
+class ImportNotAllowed(AppException):
+    def __init__(self) -> None:
+        super().__init__(ErrorCode.IMPORT_NOT_ALLOWED, "该文件当前不可保存到个人库")
 
 
 class JobNotReady(AppException):
