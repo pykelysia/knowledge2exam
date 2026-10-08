@@ -210,11 +210,18 @@ paths:
     get:
       tags: [Files]
       operationId: listMyFiles
-      summary: 个人库列表
+      summary: 个人库列表（分页）
       description: |
         我的上传（活跃、非任务输入文本类）∪ 公开池保存的引用（file_import，含原件
         已删除的行）。`status`：available / parsing / failed / deleted（deleted 即「文件已失效」）。
         前端在存在 parsing 条目时轮询本接口刷新解析进度。
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: page_size
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
       responses:
         '200':
           description: 个人库条目
@@ -805,12 +812,15 @@ components:
           description: deleted 即「文件已失效」（原件已被删除）
     LibraryResponse:
       type: object
-      required: [files]
+      required: [files, total, page, page_size]
       properties:
         files:
           type: array
           items:
             $ref: '#/components/schemas/LibraryFile'
+        total: { type: integer }
+        page: { type: integer }
+        page_size: { type: integer }
     UploadPreview:
       type: object
       description: 文件预览（基于解析产物文本）

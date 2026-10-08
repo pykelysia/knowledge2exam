@@ -13,13 +13,17 @@ import json
 import logging
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core.db import AsyncSessionLocal
 from app.core.debug_log import log_error
-from app.core.enums import FILE_SOURCE_TYPES, TEXT_SOURCE_TYPES, SourceType
+from app.core.enums import (
+    FILE_SOURCE_TYPES,
+    TEXT_SOURCE_TYPES,
+    VECTORIZED_SOURCE_TYPES,
+)
 from app.core.exceptions import ErrorCode
 from app.core.storage import StorageError, storage
 from app.core.task_registry import is_running, register
@@ -38,9 +42,6 @@ from app.models.upload import Upload
 from app.retrieval.vector_store import PgVectorStore
 
 logger = logging.getLogger(__name__)
-
-# 走向量化检索的内容类型（与任务检索白名单一致）
-VECTORIZED_SOURCE_TYPES = {SourceType.book, SourceType.lecture, SourceType.note}
 
 
 def parsed_text_key(upload_id: uuid.UUID) -> str:
@@ -153,7 +154,7 @@ async def _apply_page_ocr(
                 "code": ErrorCode.OCR_DEGRADED.value,
                 "message": (
                     "损坏页数超过上限 "
-                    f"(ocr_max_pages={getattr(settings, 'ocr_max_pages', 60)})，"
+                    f"(ocr_max_pages={settings.ocr_max_pages})，"
                     "部分页面未做视觉识别"
                 ),
             }
@@ -168,19 +169,24 @@ async def _persist_artifacts(
     char_count: int,
     warnings: list[dict],
 ) -> None:
-    """落盘解析产物、切块嵌入，并收敛解析状态（含软删除检查点）。"""
+    """落盘解析产物、切块嵌入，并原子收敛解析状态。
+
+    收敛用条件 UPDATE（`WHERE deleted_at IS NULL`）在同一事务内完成：
+    解析期间被软删除的行 rowcount=0，chunk 写入与产物登记一并回滚，
+    不留孤儿数据；未删除则整体提交。
+    """
     parsed_key = parsed_text_key(upload.id)
     await storage.put(parsed_key, json.dumps(text).encode("utf-8"))
-    upload.parsed_key = parsed_key
-    upload.char_count = char_count
 
     if upload.source_type in VECTORIZED_SOURCE_TYPES:
         chunker = Chunker(
-            chunk_size=getattr(settings, "chunk_size", 700),
-            overlap=getattr(settings, "chunk_overlap", 100),
+            chunk_size=settings.chunk_size,
+            overlap=settings.chunk_overlap,
         )
-        # PDF 产物按 `--- Page N ---` 标记追踪页码写入 chunk.page
-        chunks = chunker.chunk_pdf(text, source_type=upload.source_type)
+        # CPU 密集：下放线程池执行，避免阻塞事件循环（大文本切块可达秒级）
+        chunks = await asyncio.to_thread(
+            chunker.chunk_pdf, text, source_type=upload.source_type
+        )
         if chunks:
             embedder = EmbeddingClient.from_settings()
             embeddings = await embedder.embed([c.text for c in chunks])
@@ -188,18 +194,21 @@ async def _persist_artifacts(
             # 复用 db 事务：chunk 写入失败时与解析产物登记一起回滚
             await PgVectorStore(AsyncSessionLocal).upsert(chunks, session=db)
 
-    # 软删除检查点：删除请求可能已在解析期间置位（独立会话读已提交真相）。
-    # 已删除的行不再收敛状态，chunk 写入随本事务回滚。
-    async with AsyncSessionLocal() as check_db:
-        deleted_at = await check_db.scalar(
-            select(Upload.deleted_at).where(Upload.id == upload.id)
+    result = await db.execute(
+        update(Upload)
+        .where(Upload.id == upload.id, Upload.deleted_at.is_(None))
+        .values(
+            parsed_key=parsed_key,
+            char_count=char_count,
+            parse_status="succeeded",
+            parse_warnings=warnings,
         )
-    if deleted_at is not None:
+        .execution_options(synchronize_session=False)
+    )
+    if result.rowcount == 0:
+        # 解析期间行已被软删除：丢弃本事务全部写入
         await db.rollback()
         return
-
-    upload.parse_status = "succeeded"
-    upload.parse_warnings = warnings
     await db.commit()
 
 

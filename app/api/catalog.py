@@ -33,8 +33,8 @@ async def list_schools(db: AsyncSession = Depends(get_db)) -> SchoolsResponse:
 async def list_courses(db: AsyncSession = Depends(get_db)) -> CoursesResponse:
     """全局课程列表，附每课程公开池（本校 + 全局可见）的活跃文件数。"""
 
-    # 排除仅作为任务输入、不进库/池的手动文本类
-    pool_types = [st for st in FILE_SOURCE_TYPES if st.value != "extra_requirement"]
+    # extra_requirement 属 TEXT 类型本就不在 FILE_SOURCE_TYPES 内，此处直接全量
+    pool_types = list(FILE_SOURCE_TYPES)
 
     counts = dict(
         (

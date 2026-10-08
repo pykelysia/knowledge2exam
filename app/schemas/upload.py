@@ -71,6 +71,9 @@ class LibraryFile(BaseModel):
 
 class LibraryResponse(BaseModel):
     files: list[LibraryFile]
+    total: int
+    page: int
+    page_size: int
 
 
 class UploadPreview(BaseModel):

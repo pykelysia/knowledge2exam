@@ -34,7 +34,7 @@ from app.agents.schemas import (
 )
 from app.agents.skills import SkillError, SkillSource
 from app.agents.workspace import Workspace, WorkspaceError
-from app.core.enums import SourceType
+from app.core.enums import VECTORIZED_SOURCE_TYPES
 from app.core.storage import Storage
 from app.rendering.markdown import sanitize_markdown
 from app.rendering.renderer import Renderer, get_renderer
@@ -50,7 +50,8 @@ PDF_PATH = "output/paper.pdf"
 # 单次 read_file 返回的最大字符数（保护上下文）
 MAX_READ_CHARS = 20_000
 
-_KNOWLEDGE_SOURCE_TYPES = (SourceType.book, SourceType.lecture, SourceType.note)
+# 可检索内容类型与解析入库、公开池语义检索共用同一常量（app/core/enums）
+_KNOWLEDGE_SOURCE_TYPES = VECTORIZED_SOURCE_TYPES
 
 
 # ---------------------------------------------------------------------------

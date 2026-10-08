@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import AsyncSessionLocal, get_db
 from app.core.deps import get_current_user
-from app.core.enums import FILE_SOURCE_TYPES, SourceType, Visibility
+from app.core.enums import FILE_SOURCE_TYPES, VECTORIZED_SOURCE_TYPES, SourceType, Visibility
 from app.core.exceptions import ImportNotAllowed, UploadNotFound
 from app.models.catalog import Course, School
 from app.models.library import FileImport
@@ -188,7 +188,7 @@ async def _semantic_scores(
             filter_expr={
                 "and": [
                     {"in": {"upload_id": [str(u) for u in upload_ids]}},
-                    {"in": {"source_type": ["book", "lecture", "note"]}},
+                    {"in": {"source_type": [st.value for st in VECTORIZED_SOURCE_TYPES]}},
                 ]
             },
             top_k=_SEMANTIC_TOP_K,

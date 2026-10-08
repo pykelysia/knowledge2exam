@@ -10,12 +10,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -55,14 +56,19 @@ from app.schemas.upload import (
     LibraryResponse,
     TextUploadCreate,
     UploadPreview,
+    UploadUpdate,
 )
 from app.schemas.upload import Upload as UploadSchema
-from app.schemas.upload import UploadUpdate
 
 router = APIRouter(tags=["Uploads"])
 
+logger = logging.getLogger(__name__)
+
 _ALLOWED_EXTENSIONS_FOR_MSG = sorted(SUPPORTED_EXTENSIONS)
 _READ_CHUNK_SIZE = 1024 * 1024
+
+# 个人库默认分页大小
+_DEFAULT_LIBRARY_PAGE_SIZE = 50
 
 
 def _file_source_type(value: str) -> SourceType:
@@ -310,6 +316,12 @@ async def update_upload(
 
     provided = payload.model_fields_set
 
+    # visibility 没有「清除」语义，显式 null 一律拒绝（NOT NULL 列，防 500）
+    if "visibility" in provided and payload.visibility is None:
+        raise AppException(
+            ErrorCode.INPUT_EMPTY, "visibility 不可为空；收回共享请显式改为 private"
+        )
+
     if "visibility" in provided and upload.source_type in TEXT_SOURCE_TYPES:
         raise AppException(
             ErrorCode.SHARE_NOT_ALLOWED, "手动输入类内容不可修改可见性"
@@ -364,21 +376,25 @@ async def delete_upload(
     await db.execute(delete(ChunkModel).where(ChunkModel.upload_id == upload_id))
     await db.commit()
 
-    # 原件与解析产物尽力清理（失败不影响删除语义）
+    # 原件与解析产物尽力清理（失败不影响删除语义，但留痕便于排查存储故障）
     for key in (upload.storage_key, upload.parsed_key):
         if key:
             try:
                 await storage.delete(key)
             except Exception:  # noqa: BLE001
-                pass
+                logger.warning(
+                    "删除存储对象失败（upload=%s key=%s）", upload_id, key, exc_info=True
+                )
 
 
 @router.get("/files/mine", response_model=LibraryResponse)
 async def list_my_files(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(_DEFAULT_LIBRARY_PAGE_SIZE, ge=1, le=200),
     user: AppUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> LibraryResponse:
-    """个人库：我的上传（活跃）+ 公开池保存的引用（含已失效原件）。"""
+    """个人库（分页）：我的上传（活跃）+ 公开池保存的引用（含已失效原件）。"""
 
     # 本人上传：活跃、非任务输入文本类
     own_rows = (
@@ -407,12 +423,16 @@ async def list_my_files(
         row[0].id: row[0] for row in import_rows if row[0].id not in own_ids
     }
 
-    # 汇总条目并按创建时间倒序
+    # 汇总条目并按创建时间倒序，分页切片
     entries: list[tuple[Upload, bool]] = [(u, False) for u in own_rows]
     entries += [(u, True) for u in imported_uploads.values()]
     entries.sort(key=lambda e: e[0].created_at, reverse=True)
 
-    owner_ids = {u.user_id for u, _ in entries}
+    total = len(entries)
+    start = (page - 1) * page_size
+    page_entries = entries[start : start + page_size]
+
+    owner_ids = {u.user_id for u, _ in page_entries}
     owners: dict[uuid.UUID, AppUser] = {}
     if owner_ids:
         rows = (
@@ -421,7 +441,7 @@ async def list_my_files(
         owners = {o.id: o for o in rows}
 
     files = []
-    for upload, is_imported in entries:
+    for upload, is_imported in page_entries:
         item = _library_file(
             upload,
             imported=is_imported,
@@ -434,7 +454,7 @@ async def list_my_files(
         )
         files.append(item)
 
-    return LibraryResponse(files=files)
+    return LibraryResponse(files=files, total=total, page=page, page_size=page_size)
 
 
 def _library_file(
@@ -504,11 +524,12 @@ async def preview_file(
         text = upload.raw_text or ""
     else:
         key = upload.parsed_key or parsed_text_key(upload.id)
-        try:
-            raw = await storage.get(key)
-            text = json.loads(raw.decode("utf-8"))
-        except Exception as exc:  # noqa: BLE001
-            raise UploadNotParsed("解析产物缺失或不可读，无法预览") from exc
+    try:
+        raw = await storage.get(key)
+        text = json.loads(raw.decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("读取解析产物失败（upload=%s key=%s）", upload_id, key, exc_info=True)
+        raise UploadNotParsed("解析产物缺失或不可读，无法预览") from exc
 
     limit = settings.max_preview_chars
     truncated = len(text) > limit

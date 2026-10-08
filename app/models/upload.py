@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from sqlalchemy import (
     BigInteger,
@@ -88,10 +89,10 @@ class Upload(Base, TimestampMixin):
     # 解析产物登记（上传后异步解析管线写入）
     parsed_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     char_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    parse_warnings: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    parse_warnings: Mapped[list[dict]] = mapped_column(JSONB, nullable=False, default=list)
     parse_status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
     parse_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 软删除：置位后从库/池消失，个人库引用侧标记「文件已失效」
-    deleted_at: Mapped[object | None] = mapped_column(
+    deleted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

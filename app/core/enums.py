@@ -28,6 +28,13 @@ FILE_SOURCE_TYPES = {
 # 手动输入类内容类型（application/json 提交），不可共享
 TEXT_SOURCE_TYPES = {SourceType.manual_text, SourceType.extra_requirement}
 
+# 可向量化检索的内容类型（解析入库、任务检索白名单、公开池语义检索共用）
+VECTORIZED_SOURCE_TYPES: tuple[SourceType, ...] = (
+    SourceType.book,
+    SourceType.lecture,
+    SourceType.note,
+)
+
 
 class Visibility(StrEnum):
     """文件可见性。
