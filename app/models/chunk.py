@@ -1,6 +1,7 @@
 """向量 chunk 表 `chunk`。
 
-承载向量检索的最小单元，metadata 字段同时服务于过滤与断点续跑。
+承载向量检索的最小单元，直接挂在 upload 下（1 个 upload 对多个 chunk）。
+任务检索按 upload 白名单过滤，不再冗余归属/可见性字段。
 """
 
 from __future__ import annotations
@@ -8,7 +9,6 @@ from __future__ import annotations
 import uuid
 
 from sqlalchemy import (
-    Boolean,
     Enum,
     ForeignKey,
     Index,
@@ -32,8 +32,8 @@ except ImportError:
 class Chunk(Base, TimestampMixin):
     __tablename__ = "chunk"
     __table_args__ = (
-        # upsert 幂等去重依赖的复合唯一约束（ON CONFLICT (resource_id, chunk_index)）
-        UniqueConstraint("resource_id", "chunk_index"),
+        # upsert 幂等去重依赖的复合唯一约束（ON CONFLICT (upload_id, chunk_index)）
+        UniqueConstraint("upload_id", "chunk_index"),
         # 向量索引：HNSW + 余弦相似度
         Index(
             "idx_chunk_vector",
@@ -42,36 +42,17 @@ class Chunk(Base, TimestampMixin):
             postgresql_with={"dim": settings.embedding_dimensions},
             postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
-        # payload 索引：过滤用
-        Index(
-            "idx_chunk_payload",
-            "school_id",
-            "course_id",
-            "source_type",
-            "is_shared",
-        ),
+        # 任务白名单过滤 + 按 upload 清理
+        Index("idx_chunk_upload", "upload_id"),
     )
 
     id: Mapped[uuid.UUID] = uuid_pk()
-    resource_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("resource.id", ondelete="CASCADE"), nullable=False
-    )
     upload_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("upload.id"), nullable=False
-    )
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("app_user.id"), nullable=False
-    )
-    school_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("school.id"), nullable=True
-    )
-    course_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("course.id"), nullable=True
     )
     source_type: Mapped[SourceType] = mapped_column(
         Enum(SourceType, name="source_type"), nullable=False
     )
-    is_shared: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     page: Mapped[int | None] = mapped_column(Integer, nullable=True)
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)

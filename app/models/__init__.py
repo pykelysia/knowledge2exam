@@ -9,8 +9,8 @@ from app.models.base import Base
 from app.models.catalog import Course, School
 from app.models.chunk import Chunk
 from app.models.job import Job, JobStage, JobUpload
+from app.models.library import FileImport
 from app.models.plan import PlanItem
-from app.models.resource import Resource
 from app.models.revision import PaperRevision
 from app.models.skill import CoursePreference
 from app.models.upload import Upload
@@ -23,7 +23,7 @@ __all__ = [
     "School",
     "Course",
     "Upload",
-    "Resource",
+    "FileImport",
     "Chunk",
     "Job",
     "JobUpload",

@@ -27,3 +27,16 @@ FILE_SOURCE_TYPES = {
 }
 # 手动输入类内容类型（application/json 提交），不可共享
 TEXT_SOURCE_TYPES = {SourceType.manual_text, SourceType.extra_requirement}
+
+
+class Visibility(StrEnum):
+    """文件可见性。
+
+    - private：仅本人可见
+    - school：本校可见（观看者学校归属与文件一致）
+    - public：全局公开池
+    """
+
+    private = "private"
+    school = "school"
+    public = "public"
