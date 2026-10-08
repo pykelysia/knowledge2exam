@@ -14,10 +14,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import update
 
-from app.api import artifacts, auth, catalog, jobs, revisions, uploads
+from app.api import artifacts, auth, catalog, jobs, pool, revisions, uploads
 from app.config import DEFAULT_JWT_SECRET, settings
 from app.core.db import AsyncSessionLocal
 from app.core.exceptions import AppException, ErrorCode
+from app.ingestion.pipeline import recover_pending_uploads
 from app.models.job import Job
 from app.orchestration.state_machine import TERMINAL_STATUSES
 from app.rendering.setup import ensure_pandoc_available
@@ -53,6 +54,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     if recovered:
         logging.getLogger(__name__).warning(
             "服务重启：已将 %d 个非终态任务定格为 failed（SERVER_RESTARTED）", recovered
+        )
+
+    # 重启后补跑非终态的上传解析（写入幂等，安全重跑）
+    requeued = await recover_pending_uploads()
+    if requeued:
+        logging.getLogger(__name__).info(
+            "服务重启：已重新入队 %d 个未完成的上传解析", requeued
         )
 
     # 渲染依赖缺失时启动报错（渲染期会自动降级 md_only）；安装由部署显式负责
@@ -100,6 +108,7 @@ API_PREFIX = "/api/v1"
 
 app.include_router(auth.router, prefix=API_PREFIX)
 app.include_router(uploads.router, prefix=API_PREFIX)
+app.include_router(pool.router, prefix=API_PREFIX)
 app.include_router(jobs.router, prefix=API_PREFIX)
 app.include_router(artifacts.router, prefix=API_PREFIX)
 app.include_router(catalog.router, prefix=API_PREFIX)

@@ -19,7 +19,8 @@ class SchoolsResponse(BaseModel):
 class Course(BaseModel):
     course_id: uuid.UUID
     name: str
-    shared_resource_count: int = 0
+    # 该课程在公开池（本校 + 全局可见）中的活跃文件数
+    pool_file_count: int = 0
 
 
 class CoursesResponse(BaseModel):
