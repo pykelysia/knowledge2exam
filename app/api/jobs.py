@@ -21,14 +21,13 @@ from app.core.exceptions import (
     ErrorCode,
     JobAlreadyFinished,
     JobNotFound,
-    SchoolNotFound,
     UploadNotFound,
 )
 from app.core.storage import storage
 from app.core.task_registry import cancel as cancel_task
 from app.core.task_registry import register
-from app.models.catalog import Course, School
 from app.models.job import Job, JobStage, JobUpload
+from app.models.library import FileImport
 from app.models.plan import PlanItem
 from app.models.upload import Upload
 from app.models.user import AppUser
@@ -112,47 +111,59 @@ async def create_job(
     user: AppUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> JobAccepted:
-    uploads: list[Upload] = []
-    if payload.upload_ids:
-        rows = (
-            await db.scalars(
-                select(Upload).where(
-                    Upload.id.in_(payload.upload_ids), Upload.user_id == user.id
-                )
-            )
-        ).all()
-        found = {u.id for u in rows}
-        missing = [str(i) for i in payload.upload_ids if i not in found]
-        if missing:
-            raise UploadNotFound()
-        uploads = list(rows)
+    # 去重保持提交顺序
+    upload_ids = list(dict.fromkeys(payload.upload_ids))
 
-    text_uploads = [u for u in uploads if u.raw_text is not None]
-    if not payload.upload_ids and not text_uploads:
+    uploads: list[Upload] = []
+    if upload_ids:
+        rows = (
+            await db.scalars(select(Upload).where(Upload.id.in_(upload_ids)))
+        ).all()
+        by_id = {u.id: u for u in rows}
+        imported_ids = set(
+            (
+                await db.scalars(
+                    select(FileImport.upload_id).where(
+                        FileImport.user_id == user.id,
+                        FileImport.upload_id.in_(upload_ids),
+                    )
+                )
+            ).all()
+        )
+        for upload_id in upload_ids:
+            upload = by_id.get(upload_id)
+            if (
+                upload is None
+                or upload.deleted_at is not None
+                or (upload.user_id != user.id and upload_id not in imported_ids)
+            ):
+                raise UploadNotFound()
+        uploads = [by_id[uid] for uid in upload_ids]
+
+    if not uploads:
         raise AppException(ErrorCode.INPUT_EMPTY, "无任何输入")
 
-    if payload.school_id is not None or payload.course_id is not None:
-        if payload.school_id is None or payload.course_id is None:
-            raise AppException(
-                ErrorCode.SHARE_SCOPE_REQUIRED, "school_id 与 course_id 必须同时提供"
-            )
-        if await db.get(School, payload.school_id) is None:
-            raise SchoolNotFound()
-        course = await db.get(Course, payload.course_id)
-        if course is None or course.school_id != payload.school_id:
-            raise AppException(
-                ErrorCode.SHARE_SCOPE_REQUIRED, "课程不存在或不属于该学校"
-            )
-
-    if any(u.shareable for u in uploads) and (not payload.school_id or not payload.course_id):
+    # 解析门禁：文件在上传后异步解析，未完成/失败的不允许进入出卷
+    not_ready = [
+        u.filename or str(u.id) for u in uploads if u.parse_status != "succeeded"
+    ]
+    if not_ready:
         raise AppException(
-            ErrorCode.SHARE_SCOPE_REQUIRED, "共享但未指定学校课程"
+            ErrorCode.UPLOAD_NOT_PARSED,
+            "以下文件尚未解析完成或解析失败，不能用于出卷",
+            detail={"files": not_ready},
         )
+
+    # 学校/课程标签从所选文件推导：全部同校且同课时才生效（用于课程偏好作用域）
+    school_ids = {u.school_id for u in uploads if u.school_id is not None}
+    course_ids = {u.course_id for u in uploads if u.course_id is not None}
+    derived_school_id = next(iter(school_ids)) if len(school_ids) == 1 else None
+    derived_course_id = next(iter(course_ids)) if len(course_ids) == 1 else None
 
     job = Job(
         user_id=user.id,
-        school_id=payload.school_id,
-        course_id=payload.course_id,
+        school_id=derived_school_id,
+        course_id=derived_course_id,
         status=JobStatus.pending.value,
         duration_minutes=payload.duration_minutes,
         need_explanation=payload.need_explanation,

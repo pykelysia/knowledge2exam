@@ -27,9 +27,9 @@ class Stage(StrEnum):
 
 
 class JobCreate(BaseModel):
+    """创建任务。学校/课程标签从所选文件的标签自动推导（全部同校同课时生效）。"""
+
     upload_ids: list[uuid.UUID] = Field(default_factory=list)
-    school_id: uuid.UUID | None = None
-    course_id: uuid.UUID | None = None
     duration_minutes: int = Field(default=100, ge=5, le=300)
     need_explanation: bool = False
 

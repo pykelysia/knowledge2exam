@@ -1,7 +1,8 @@
 """编排层入口。
 
 真实实现：文件式 ReAct agent（见 app/agents/agent.py）。
-预处理把用户材料写入 agent 工作区（agent/materials/），agent 规划蓝图并把
+解析已前移到上传阶段（app/ingestion/pipeline.py）：预处理只把现成的
+解析产物整理进 agent 工作区（agent/materials/），agent 规划蓝图并把
 整卷 Markdown 直接书写到 output/paper.md，最后经 render_paper 工具渲染 PDF
 （失败自动降级交付 md）；编排层在 agent 返回后仅负责入库蓝图
 （persist_exam_result）与提交渲染产物（md_key/pdf_key/状态）。
@@ -28,27 +29,14 @@ from app.core.db import AsyncSessionLocal
 from app.core.debug_log import log_error, log_step
 from app.core.enums import FILE_SOURCE_TYPES, TEXT_SOURCE_TYPES, SourceType
 from app.core.exceptions import ErrorCode
-from app.core.storage import StorageError, storage
-from app.ingestion.chunking import Chunk, Chunker
-from app.ingestion.embedding import EmbeddingClient
-from app.ingestion.parsers import get_parser
-from app.ingestion.parsers.base import ParseResult
-from app.ingestion.postprocess import (
-    build_merged_text,
-    inline_image_text,
-    process_images,
-    replace_page_text,
-    run_page_ocr,
-)
+from app.core.storage import storage
 from app.models.job import Job, JobUpload
 from app.models.plan import PlanItem
-from app.models.resource import Resource
 from app.models.upload import Upload
 from app.orchestration.events import EventBus
 from app.orchestration.integration import persist_exam_result
 from app.orchestration.preference import list_course_preferences
 from app.orchestration.state_machine import TERMINAL_STATUSES, JobStatus, Stage
-from app.retrieval.vector_store import PgVectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -419,61 +407,49 @@ async def _run_real_pipeline(db: AsyncSession, job: Job, bus: EventBus) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 真实预处理（解析、切块、嵌入、材料落盘）
+# 预处理：把现成解析产物整理进 agent 工作区
 # ---------------------------------------------------------------------------
 
 
-async def _apply_page_ocr(
-    job: Job, bus: EventBus, upload: Upload, result: ParseResult
-) -> set[int]:
-    """对解析器标记的损坏页执行视觉 OCR；成功页替换文本，失败页保留原文并告警。
+async def _load_parsed_text(job: Job, bus: EventBus, upload: Upload) -> str | None:
+    """读取上传件全文：文本类直接用 raw_text，文件类读解析产物。
 
-    返回成功完成 OCR 的页码集合（1-based），供调用方跳过这些页的内嵌图片 OCR。
+    产物缺失或解析失败时发告警并返回 None（该材料不写入工作区，
+    agent 基于其余材料继续）。
     """
+    if upload.source_type in TEXT_SOURCE_TYPES:
+        return upload.raw_text or ""
+
+    if upload.parse_status != "succeeded" or not upload.parsed_key:
+        await bus.emit(
+            job.id,
+            "warning",
+            {
+                "code": ErrorCode.PARSE_FAILED.value,
+                "upload_id": str(upload.id),
+                "message": upload.parse_error or "解析产物缺失，材料未写入工作区",
+            },
+        )
+        return None
+
     try:
-        page_texts, failed = await run_page_ocr(result.page_renders or [])
-    except Exception as exc:
-        logger.warning("job=%s upload=%s 页级 OCR 整体失败: %s", job.id, upload.id, exc)
-        failed = list(result.page_renders or [])
-        page_texts = {}
-
-    if page_texts:
-        result.text = replace_page_text(result.text, page_texts)
-        result.char_count = len(result.text)
-
-    for render in failed:
+        raw = await storage.get(upload.parsed_key)
+        return json.loads(raw.decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001
         await bus.emit(
             job.id,
             "warning",
             {
-                "code": ErrorCode.OCR_DEGRADED,
-                "upload_id": upload.id,
-                "message": (
-                    f"第 {render.page} 页文本层损坏（{render.reason}），"
-                    "视觉识别失败，该页内容可能缺失"
-                ),
+                "code": ErrorCode.PARSE_FAILED.value,
+                "upload_id": str(upload.id),
+                "message": f"解析产物读取失败：{exc}",
             },
         )
-
-    if result.page_renders_truncated:
-        await bus.emit(
-            job.id,
-            "warning",
-            {
-                "code": ErrorCode.OCR_DEGRADED,
-                "upload_id": upload.id,
-                "message": (
-                    "损坏页数超过上限 "
-                    f"(ocr_max_pages={getattr(settings, 'ocr_max_pages', 60)})，"
-                    "部分页面未做视觉识别"
-                ),
-            },
-        )
-    return set(page_texts)
+        return None
 
 
 async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, Any]:
-    """解析所有上传件，切块嵌入，把用户材料写入 agent 工作区。"""
+    """把所选上传件的解析产物整理进 agent 工作区（解析已在上传阶段完成）。"""
     # 1. 加载 uploads（按创建时间排序，保证材料命名与撞名后缀的确定性）
     upload_rows = (
         await db.scalars(
@@ -484,118 +460,28 @@ async def _preprocess(db: AsyncSession, job: Job, bus: EventBus) -> dict[str, An
     ).all()
     uploads = list(upload_rows)
 
-    # 2. 初始化组件
-    vector_store = PgVectorStore(AsyncSessionLocal)
-    embedder = EmbeddingClient.from_settings()
-    chunker = Chunker(
-        chunk_size=getattr(settings, "chunk_size", 700),
-        overlap=getattr(settings, "chunk_overlap", 100),
-    )
-
     past_papers: list[tuple[str, str]] = []
     exclusive_texts: dict[str, list[str]] = {}
 
-    # 3. 逐文件/文本解析
+    # 2. 按内容类型归置全文材料
     for upload in uploads:
-        # 文本类上传（manual_text / extra_requirement）没有 filename，
-        # 直接使用 raw_text，无需调用文件解析器。
-        if upload.source_type in TEXT_SOURCE_TYPES:
-            text = upload.raw_text or ""
-            char_count = len(text)
-            upload.parse_status = "succeeded"
-        else:
-            parser = get_parser(upload.filename or "")
-            try:
-                if not upload.storage_key:
-                    raise StorageError(f"上传件缺少存储对象: id={upload.id}")
-                data = await storage.get(upload.storage_key)
-                result = await parser.parse_async(upload.filename or "", data)
-
-                # 页级视觉 OCR 兜底：损坏页/扫描页整页转录为 Markdown（失败保留原文并告警）
-                ocr_pages: set[int] = set()
-                if result.page_renders:
-                    ocr_pages = await _apply_page_ocr(job, bus, upload, result)
-
-                # 整页已被视觉 OCR 覆盖的页面，跳过其内嵌图片的单独 OCR（避免内容重复）
-                if result.images and ocr_pages:
-                    result.images = [
-                        img for img in result.images if img.page not in ocr_pages
-                    ] or None
-
-                # 图片后处理（OCR 在工作线程内执行）：去重、合并、间隙标记
-                if result.images:
-                    await asyncio.to_thread(process_images, result.images)
-                    # 占位符就地融合（PDF 图片/图表引用回填原文位置）；
-                    # 无占位符的解析产物（旧格式/其他解析器）回退文末追加
-                    inlined = await asyncio.to_thread(
-                        inline_image_text, result.text, result.images
-                    )
-                    if inlined is not None:
-                        result.text = inlined
-                    else:
-                        image_text = await asyncio.to_thread(build_merged_text, result.images)
-                        if image_text:
-                            result.text = result.text + "\n\n" + image_text
-                    result.char_count = len(result.text)
-
-                text = result.text
-                char_count = result.char_count
-                upload.parse_status = "succeeded"
-            except Exception as exc:
-                upload.parse_status = "failed"
-                upload.parse_error = str(exc)
-                await bus.emit(
-                    job.id,
-                    "warning",
-                    {
-                        "code": ErrorCode.PARSE_FAILED,
-                        "upload_id": upload.id,
-                        "message": str(exc),
-                    },
-                )
-                await db.commit()
-                continue
-
-        # 创建 resource
-        resource = Resource(
-            upload_id=upload.id,
-            source_type=upload.source_type,
-            school_id=job.school_id,
-            course_id=job.course_id,
-            char_count=char_count,
-            is_shared=upload.shareable and job.school_id is not None and job.course_id is not None,
-        )
-        db.add(resource)
-        await db.flush()
-
-        # 存解析产物到对象存储
-        parsed_key = f"jobs/{job.id}/parsed/{resource.id}.json"
-        await storage.put(parsed_key, json.dumps(text).encode("utf-8"))
-
+        text = await _load_parsed_text(job, bus, upload)
+        if text is None:
+            continue
         if upload.source_type == SourceType.past_paper:
             # 往期试卷：全文留存，稍后写入工作区材料
             past_papers.append((upload.filename or f"unnamed_{len(past_papers) + 1}", text))
         elif upload.source_type == SourceType.keypoint_list:
-            # 重点清单：全文留存供意图提取与 agent 查阅，不走向量检索（过滤器只含
-            # book/lecture/note），跳过切块嵌入省一次 embedding 调用
+            # 重点清单：全文留存供意图提取与 agent 查阅，不走向量检索
             exclusive_texts.setdefault(upload.source_type.value, []).append(text)
         elif upload.source_type in FILE_SOURCE_TYPES:
-            # 可向量化的文件类（book / lecture / note）：切块 + 嵌入
-            # PDF 产物按 `--- Page N ---` 标记追踪页码写入 chunk.page
-            chunks = chunker.chunk_pdf(text, source_type=upload.source_type)
-            if chunks:
-                # 批量嵌入
-                embeddings = await embedder.embed([c.text for c in chunks])
-                _bind_chunk_metadata(chunks, embeddings, resource=resource, upload=upload, job=job)
-
-                # 复用 db 事务：chunk 与本事务内 flush 过的 resource 行
-                # 在同一连接上对外键可见，失败时与 resource 一起回滚
-                await vector_store.upsert(chunks, session=db)
+            # 可向量化类（book / lecture / note）：检索走 chunk 白名单，不写全文材料
+            pass
         else:
             # 文本类（manual_text / extra_requirement）：全文留存
             exclusive_texts.setdefault(upload.source_type.value, []).append(text)
 
-    # 4. 用户材料写入 agent 工作区（materials/）
+    # 3. 用户材料写入 agent 工作区（materials/）
     workspace = Workspace(storage, f"jobs/{job.id}/agent")
     material_files: list[str] = []
     used_stems: set[str] = set()
@@ -640,25 +526,3 @@ def _join_material_texts(source_key: str, texts: list[str]) -> str:
         if len(joined) > limit:
             joined = joined[:limit] + f"\n\n[内容过长，已截断至 {limit} 字符]"
     return joined
-
-
-def _bind_chunk_metadata(
-    chunks: list[Chunk],
-    embeddings: list[list[float]],
-    *,
-    resource: Resource,
-    upload: Upload,
-    job: Job,
-) -> None:
-    """把资源/任务元信息与嵌入向量绑定到 chunk（zip 严格等长，多则抛错）。"""
-    for chunk, embedding in zip(chunks, embeddings, strict=True):
-        chunk.resource_id = resource.id
-        chunk.upload_id = upload.id
-        chunk.user_id = job.user_id
-        chunk.school_id = job.school_id
-        chunk.course_id = job.course_id
-        chunk.source_type = upload.source_type
-        chunk.is_shared = (
-            upload.shareable and job.school_id is not None and job.course_id is not None
-        )
-        chunk.embedding = embedding

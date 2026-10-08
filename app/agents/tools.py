@@ -251,7 +251,7 @@ def _search_knowledge_tool(ctx: AgentContext) -> StructuredTool:
     async def search_knowledge(query: str, top_k: int = 5) -> str:
         filter_expr = _knowledge_filter(ctx)
         if filter_expr is None:
-            return "知识库为空：本次任务没有可检索的上传资料，也没有同校同课程的共享内容。"
+            return "知识库为空：本次任务没有选中的知识库文件。"
         try:
             result = await ctx.vector_store.search(
                 query=query, filter_expr=filter_expr, top_k=top_k
@@ -273,7 +273,7 @@ def _search_knowledge_tool(ctx: AgentContext) -> StructuredTool:
         coroutine=search_knowledge,
         name="search_knowledge",
         description=(
-            "检索本次任务可用的知识库（用户上传的书籍/课件/笔记 + 同校同课程的共享内容）。"
+            "检索本次任务选中的知识库文件（用户挑选的书籍/课件/笔记）。"
             "返回最相关的文本片段。"
         ),
         args_schema=SearchKnowledgeArgs,
@@ -281,37 +281,13 @@ def _search_knowledge_tool(ctx: AgentContext) -> StructuredTool:
 
 
 def _knowledge_filter(ctx: AgentContext) -> dict[str, Any] | None:
-    """构造知识库过滤条件：本 job 上传的叠加类内容 OR 同校同课程共享内容。
+    """构造知识库过滤条件：任务选中上传件的白名单 × 可检索内容类型。
 
-    外层再 AND 跨用户隔离不变量（个人内容限本人，其余必须是显式共享），
-    保证任何分支组合下都不会检索到他人私有未共享内容。
+    白名单之外的内容在 SQL 层面即不可达，不存在跨用户泄漏面。
     """
-    branches: list[dict[str, Any]] = []
-    for st in _KNOWLEDGE_SOURCE_TYPES:
-        if ctx.school_id and ctx.course_id:
-            branches.append(
-                FilterBuilder.additive(
-                    school_id=ctx.school_id,
-                    course_id=ctx.course_id,
-                    source_type=st,
-                    upload_ids=ctx.upload_ids,
-                )
-            )
-        elif ctx.upload_ids:
-            branches.append(
-                {
-                    "and": [
-                        {"in": {"upload_id": [str(u) for u in ctx.upload_ids]}},
-                        {"eq": {"source_type": st.value}},
-                    ],
-                }
-            )
-    if not branches:
+    if not ctx.upload_ids:
         return None
-    base: dict[str, Any] = {"or": branches} if len(branches) > 1 else branches[0]
-    if ctx.user_id is not None:
-        return {"and": [base, FilterBuilder.user_scope(ctx.user_id)]}
-    return base
+    return FilterBuilder.whitelist(ctx.upload_ids, list(_KNOWLEDGE_SOURCE_TYPES))
 
 
 def _load_skill_tool(ctx: AgentContext) -> StructuredTool:
