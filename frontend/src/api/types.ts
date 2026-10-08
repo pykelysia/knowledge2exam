@@ -17,10 +17,20 @@ export type SourceTypeFile = Exclude<SourceType, 'manual_text' | 'extra_requirem
 /** 文本类内容类型（上传接口 json 分支可用） */
 export type SourceTypeText = 'manual_text' | 'extra_requirement'
 
+/** 文件可见性：私有 / 本校 / 公开池 */
+export type Visibility = 'private' | 'school' | 'public'
+
+/** 解析状态（文件上传后异步解析） */
+export type ParseStatus = 'pending' | 'parsing' | 'succeeded' | 'failed'
+
+/** 个人库条目状态：可用 / 解析中 / 解析失败 / 原件已删除（文件已失效） */
+export type FileStatus = 'available' | 'parsing' | 'failed' | 'deleted'
+
 export interface User {
   user_id: string
   email: string
   username: string
+  school_id?: string | null
 }
 
 export interface UserResponse {
@@ -31,6 +41,13 @@ export interface RegisterRequest {
   email: string
   username: string
   password: string
+  /** 学校归属（可选），决定「本校可见」文件的观看资格 */
+  school_id?: string | null
+}
+
+export interface UserUpdateRequest {
+  /** 显式 null 表示清除学校归属 */
+  school_id?: string | null
 }
 
 export interface LoginRequest {
@@ -46,7 +63,15 @@ export interface Upload {
   source_type: SourceType
   filename?: string | null
   size_bytes?: number | null
-  shareable?: boolean
+  visibility: Visibility
+  parse_status: ParseStatus
+}
+
+export interface UploadUpdateRequest {
+  /** 显式 null 表示清除标签 */
+  visibility?: Visibility
+  school_id?: string | null
+  course_id?: string | null
 }
 
 export interface TextUploadCreate {
@@ -54,12 +79,84 @@ export interface TextUploadCreate {
   raw_text: string
 }
 
+// ---- 个人库 / 公开池 ----
+
+export interface FileOwner {
+  user_id: string
+  username: string
+}
+
+export interface LibraryFile {
+  upload_id: string
+  source_type: SourceType
+  filename?: string | null
+  size_bytes?: number | null
+  visibility: Visibility
+  school_id?: string | null
+  course_id?: string | null
+  char_count?: number | null
+  parse_status: ParseStatus
+  parse_error?: string | null
+  parse_warnings?: { code: string; message: string }[]
+  created_at: string
+  owner: FileOwner
+  /** 是否为公开池保存的引用（false = 本人上传） */
+  imported: boolean
+  imported_at?: string | null
+  status: FileStatus
+}
+
+export interface LibraryResponse {
+  files: LibraryFile[]
+}
+
+export interface UploadPreview {
+  upload_id: string
+  filename?: string | null
+  source_type: SourceType
+  visibility: Visibility
+  school_id?: string | null
+  course_id?: string | null
+  school_name?: string | null
+  course_name?: string | null
+  char_count?: number | null
+  text: string
+  truncated: boolean
+}
+
+export interface PoolFile {
+  upload_id: string
+  source_type: SourceType
+  filename?: string | null
+  size_bytes?: number | null
+  visibility: Visibility
+  school_id?: string | null
+  course_id?: string | null
+  school_name?: string | null
+  course_name?: string | null
+  char_count?: number | null
+  created_at: string
+  owner: FileOwner
+  is_saved: boolean
+  semantic_score?: number | null
+}
+
+export interface PoolFilesResponse {
+  files: PoolFile[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface ImportAccepted {
+  saved: boolean
+  upload_id: string
+}
+
 // ---- 任务 ----
 
 export interface JobCreate {
   upload_ids?: string[]
-  school_id?: string | null
-  course_id?: string | null
   duration_minutes?: number
   need_explanation?: boolean
 }
@@ -194,7 +291,8 @@ export interface SchoolsResponse {
 export interface Course {
   course_id: string
   name: string
-  shared_resource_count?: number
+  /** 该课程在公开池中的可见文件数 */
+  pool_file_count?: number
 }
 
 export interface CoursesResponse {
@@ -213,7 +311,10 @@ export type ErrorCode =
   | 'INVALID_DURATION'
   | 'JOB_NOT_FOUND'
   | 'SCHOOL_NOT_FOUND'
+  | 'COURSE_NOT_FOUND'
   | 'UPLOAD_IN_USE'
+  | 'UPLOAD_NOT_PARSED'
+  | 'IMPORT_NOT_ALLOWED'
   | 'JOB_NOT_READY'
   | 'JOB_ALREADY_FINISHED'
   | 'JOB_NOT_FINISHED'

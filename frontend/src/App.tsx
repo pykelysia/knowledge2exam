@@ -6,6 +6,8 @@ import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { Login } from '@/pages/Login'
 import { Register } from '@/pages/Register'
 import { Dashboard } from '@/pages/Dashboard'
+import { Library } from '@/pages/Library'
+import { Pool } from '@/pages/Pool'
 import { Jobs } from '@/pages/Jobs'
 import { JobDetail } from '@/pages/JobDetail'
 import { NotFound } from '@/pages/NotFound'
@@ -22,6 +24,8 @@ export default function App() {
             <Route element={<ProtectedRoute />}>
               <Route element={<Layout />}>
                 <Route path="/" element={<Dashboard />} />
+                <Route path="/library" element={<Library />} />
+                <Route path="/pool" element={<Pool />} />
                 <Route path="/jobs" element={<Jobs />} />
                 <Route path="/jobs/:jobId" element={<JobDetail />} />
               </Route>

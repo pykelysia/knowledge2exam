@@ -1,12 +1,15 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '@/hooks/useAuth'
 import { AuthShell } from '@/components/AuthShell'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Select } from '@/components/ui/select'
 import { extractApiError } from '@/api/client'
+import { listSchools } from '@/api/schools'
 import { errorMessage } from '@/lib/constants'
+import type { School } from '@/api/types'
 
 export function Register() {
   const { register } = useAuth()
@@ -15,8 +18,16 @@ export function Register() {
   const [email, setEmail] = useState('')
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [schoolId, setSchoolId] = useState('')
+  const [schools, setSchools] = useState<School[]>([])
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+
+  useEffect(() => {
+    listSchools()
+      .then((res) => setSchools(res.schools))
+      .catch(() => setSchools([]))
+  }, [])
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
@@ -27,7 +38,7 @@ export function Register() {
     }
     setSubmitting(true)
     try {
-      await register({ email, username, password })
+      await register({ email, username, password, school_id: schoolId || null })
       // 注册成功跳转登录页（注册不自动登录）。
       navigate('/login')
     } catch (err) {
@@ -75,6 +86,24 @@ export function Register() {
             autoComplete="new-password"
             required
           />
+        </div>
+        <div>
+          <Label htmlFor="school">学校（可选）</Label>
+          <Select
+            id="school"
+            value={schoolId}
+            onChange={(e) => setSchoolId(e.target.value)}
+          >
+            <option value="">暂不选择</option>
+            {schools.map((s) => (
+              <option key={s.school_id} value={s.school_id}>
+                {s.name}
+              </option>
+            ))}
+          </Select>
+          <p className="mt-1.5 text-[12px] text-slate-400">
+            选择学校后可查看「本校共享」的资料，之后也可在个人资料中修改。
+          </p>
         </div>
         {error && <p className="text-[13px] text-red-600">{error}</p>}
         <Button type="submit" className="w-full" disabled={submitting}>

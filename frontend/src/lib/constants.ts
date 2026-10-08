@@ -1,4 +1,4 @@
-import type { ErrorCode, JobStatus, SourceType } from '@/api/types'
+import type { ErrorCode, FileStatus, JobStatus, SourceType, Visibility } from '@/api/types'
 
 /** 内容类型中文标签与是否共享的元信息。 */
 export const SOURCE_TYPE_META: Record<
@@ -33,6 +33,27 @@ export const ALLOWED_EXTENSIONS = [
   'bmp',
 ]
 
+/** 文件可见性中文标签。 */
+export const VISIBILITY_META: Record<
+  Visibility,
+  { label: string; hint: string }
+> = {
+  private: { label: '私有', hint: '仅自己可见' },
+  school: { label: '本校共享', hint: '同校用户可见' },
+  public: { label: '公开池', hint: '所有用户可见' },
+}
+
+/** 个人库条目状态中文标签。 */
+export const FILE_STATUS_META: Record<
+  FileStatus,
+  { label: string; variant: 'default' | 'success' | 'warning' | 'danger' }
+> = {
+  available: { label: '可用', variant: 'success' },
+  parsing: { label: '解析中', variant: 'default' },
+  failed: { label: '解析失败', variant: 'danger' },
+  deleted: { label: '文件已失效', variant: 'warning' },
+}
+
 /** 任务状态中文标签。 */
 export const JOB_STATUS_META: Record<JobStatus, { label: string; variant: 'default' | 'success' | 'warning' | 'danger' }> = {
   pending: { label: '排队中', variant: 'default' },
@@ -51,12 +72,15 @@ export const ERROR_MESSAGES: Record<string, string> = {
   UNSUPPORTED_FORMAT: '不支持的文件格式',
   FILE_TOO_LARGE: '文件超出大小上限，建议拆分',
   PDF_ENCRYPTED: '加密 PDF 无法解析，请先移除密码',
-  SHARE_NOT_ALLOWED: '该内容类型不支持共享',
-  SHARE_SCOPE_REQUIRED: '选择共享需指定学校与课程',
+  SHARE_NOT_ALLOWED: '该内容类型不支持公开',
+  SHARE_SCOPE_REQUIRED: '本校共享需要指定学校',
   INVALID_DURATION: '考试时长需在 5~300 分钟之间',
   JOB_NOT_FOUND: '任务不存在或无权访问',
   SCHOOL_NOT_FOUND: '学校不存在或已被移除',
-  UPLOAD_IN_USE: '该上传件已被任务引用，不可删除',
+  COURSE_NOT_FOUND: '课程不存在或已被移除',
+  UPLOAD_IN_USE: '该文件正被进行中的任务使用，稍后再删',
+  UPLOAD_NOT_PARSED: '文件尚未解析完成或解析失败，稍后再试',
+  IMPORT_NOT_ALLOWED: '该文件当前不可保存（不在公开池或不在你的学校范围）',
   JOB_NOT_READY: '产物尚未生成，请稍后再试',
   JOB_ALREADY_FINISHED: '任务已终结，无法取消',
   JOB_NOT_FINISHED: '任务尚未完成，完成后才能修订',

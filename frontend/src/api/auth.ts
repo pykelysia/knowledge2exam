@@ -3,6 +3,7 @@ import type {
   LoginRequest,
   RegisterRequest,
   UserResponse,
+  UserUpdateRequest,
 } from '@/api/types'
 
 export async function register(payload: RegisterRequest): Promise<UserResponse> {
@@ -15,9 +16,16 @@ export async function login(payload: LoginRequest): Promise<UserResponse> {
   return data
 }
 
+/** 修改个人资料（学校归属；显式 null 清除）。 */
+export async function updateMe(payload: UserUpdateRequest): Promise<UserResponse> {
+  const { data } = await client.patch<UserResponse>('/auth/me', payload)
+  return data
+}
+
 // access token 过期由 client 的响应拦截器调用 refreshSession 自动续期并重放。
 export { refreshSession as refresh }
 
 export async function logout(): Promise<void> {
   await client.post('/auth/logout')
 }
+

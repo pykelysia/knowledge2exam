@@ -5,6 +5,8 @@ import { cn } from '@/lib/utils'
 
 const NAV_ITEMS = [
   { to: '/', end: true, label: '生成试卷' },
+  { to: '/library', end: false, label: '个人库' },
+  { to: '/pool', end: false, label: '公开池' },
   { to: '/jobs', end: false, label: '我的任务' },
 ] as const
 
