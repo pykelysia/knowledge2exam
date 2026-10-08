@@ -1,90 +1,50 @@
 # knowledge2exam
 
-试卷生成工具 —— 将学生的课程资料（书籍、PPT、PDF、笔记、往期试卷等）自动转化为结构化的模拟试卷。
+把你的课程资料变成一份完整的模拟试卷。
 
-> 后端提供 REST API + SSE 进度流；前端（React 19 + TypeScript）负责用户交互与文件上传。
-> 出卷由**单个 ReAct agent** 完成：规划、逐题产出、PDF 渲染与结果检验均在同一个 agent 循环内闭环。
+上传书籍、PPT、PDF、笔记、往期试卷等学习资料，再用一句自然语言说明出卷要求（题型、重点、考试时长……），系统会自动解析资料、建立课程知识库，由 AI 出卷 agent 规划并逐题撰写整卷，最终交付 Markdown 与 PDF 双格式的模拟试卷——不满意还可以划选任意范围继续修改。
 
----
-
-## 功能概览
-
-| 阶段 | 说明 |
-|------|------|
-| **资料上传** | 支持 PDF / DOCX / PPTX / Markdown / TXT / 图片（JPG、PNG、WebP、BMP）及纯文本输入（不支持 doc/ppt 旧格式） |
-| **文件预处理** | 文档解析 → 视觉 LLM OCR → 文本切块 → 向量嵌入（pgvector）；往期试卷整篇注入 agent 工作区 |
-| **意图提取** | 用户文本输入结构化为 ExamIntent（题型要求 / 重点清单 / 额外要求） |
-| **Agent 出卷** | 单个 ReAct agent 通过 7 个工具完成出卷：todo 计划管理、知识库向量检索、技能加载（出卷 / LaTeX 排版）、文件读写（整卷直写 `output/paper.md`）、整卷渲染 |
-| **PDF 渲染** | Pandoc + XeLaTeX 渲染试卷（题目与答案解析分篇）；环境缺依赖时自动降级为仅交付 Markdown |
-| **结果检验** | 渲染失败错误回传 agent 自行修正（独立重试上限，超限降级为 `partially_completed`）；蓝图中的放弃题保留标记 |
-| **划选修订** | 任务完成后在整卷预览中划选任意范围提交反馈，同一 agent 携带全部历史会话直接续跑改卷，会话与快照落库可回溯 |
-| **偏好沉淀** | 修订反馈可勾选沉淀为课程级出题偏好（同校同课程作用域）：小 LLM 提炼泛化并与既有条目合并去重（add/update/delete/noop），出题与修订时聚合为 `course-preferences` 伪技能注入技能索引（【必读】） |
-| **进度推送** | SSE 实时事件流（10 种事件类型），断线按 Last-Event-ID 补发历史事件 |
+> 出卷由单个 ReAct agent 闭环完成：规划、逐题产出、PDF 渲染与结果检验都在同一个循环内自动修正。后端提供 REST API 与 SSE 实时进度流，配套 React 前端负责用户交互与文件上传。
 
 ---
 
-## 系统架构
+## 核心功能
 
-```
-用户请求（上传资料 + 文本输入）
-    │
-    ▼
-文件预处理（解析 → OCR → 切块 → 向量嵌入）
-    │        └── 解析后文件 ──▶ 知识库（PostgreSQL + pgvector）
-    │                                 │
-    │ 文本输入（意图提取 → ExamIntent） │ search_knowledge 向量检索
-    ▼                                 ▼
-Agent 工作（单个 ReAct agent + 工具循环，整卷直写 output/paper.md）
-    │   todo_write / check_todo    出题计划与进度
-    │   search_knowledge           知识库向量检索
-    │   load_skill                 加载出卷 / LaTeX 排版技能
-    │   read_file / edit_file      工作区文件读写（试卷书写工具）
-    ▼ render_paper
-PDF 渲染（Pandoc + XeLaTeX，缺依赖自动降级 md_only）
-    ▼
-结果检验 ──成功──▶ 结果输出（output/paper.md / paper.pdf）
-    │失败
-    ▼
-回到 Agent 工作（内容错误回传修正；重试超限降级）
+### 上传资料，建立课程知识库
 
-任务完成后 ── 划选反馈修订（同一 agent 全工具续跑）
-    │   前端整卷 Markdown 预览，划选任意范围 → 所选位置下方反馈框
-    │   POST /jobs/{id}/revisions {selection, feedback}
-    ▼
-修订轮（携带划选锚点 + 反馈 + 全部历史会话）
-    │   直接修改 output/paper.md → render_paper 重渲染
-    ▼
-paper_revision 表留存会话记录与前后快照（可回溯）
-```
+- 支持 PDF / DOCX / PPTX / Markdown / TXT 文档，JPG / PNG / WebP / BMP 图片，以及直接粘贴纯文本（不支持 doc/ppt 旧格式）
+- 扫描件与图片自动 OCR 识别为文本
+- 同一份内容重复上传自动去重，不重复占用空间
+- 往期试卷整篇保留，出卷时作为参考样例
+- 资料可挂到学校 + 课程下；同校同课程的资料与解析结果自动共享复用
 
-分层结构：
+### 用自然语言描述需求，自动出整卷
 
-- **接入层**（`app/api`）：FastAPI 路由、Cookie 认证、SSE 事件流
-- **编排层**（`app/orchestration`）：状态机校验、管线调度、事件总线
-- **Agent 层**（`app/agents`）：ReAct agent、7 个工具、技能系统、工作区
-- **能力层**（`app/ingestion` / `app/retrieval` / `app/rendering`）：解析、OCR、嵌入、向量检索、渲染
-- **存储层**（`app/models` + `app/core`）：PostgreSQL + pgvector、本地对象存储、SSE 事件持久化
+- 一句话说明要求即可：题型、重点清单、额外要求
+- 可指定考试时长（5–300 分钟）与是否生成答案解析
+- agent 自主制定逐题计划，从知识库检索相关内容，一次性写出整卷
 
----
+### 实时进度
 
-## 技术栈
+- 从预处理、出卷到渲染，每个阶段的变化实时推送到页面
+- 断线重连自动补发错过的事件，进度不丢失
 
-| 类别 | 技术 |
-|------|------|
-| 框架 | FastAPI ≥ 0.115 |
-| 运行时 | Uvicorn (standard) |
-| 数据库 | PostgreSQL 16 + pgvector |
-| ORM / 迁移 | SQLAlchemy 2.x (async) + Alembic |
-| 验证 | Pydantic ≥ 2.9 + pydantic-settings |
-| Agent | LangChain ≥ 1.4（create_agent + 结构化输出）+ LangGraph ≥ 0.2.60 |
-| LLM | OpenAI 兼容协议（ChatOpenAI，可替换后端） |
-| 文档解析 | PyMuPDF、python-docx、python-pptx、Pillow、LibreOffice（旧格式转换） |
-| OCR | 视觉 LLM（`OCR_MODEL`，默认 gpt-4o） |
-| PDF 渲染 | Pandoc + XeLaTeX（缺依赖时降级为仅交付 Markdown） |
-| 认证 | httpOnly Cookie + 双 JWT + bcrypt |
-| 实时推送 | SSE (sse-starlette) |
-| HTTP 客户端 | httpx |
-| 前端 | React 19 + TypeScript + Vite 8 + Tailwind CSS 4（见 `frontend/`） |
+### 试卷交付
+
+- Markdown + PDF 双格式，题目与答案解析分篇
+- 个别题目确实无法产出时会在卷面标记并跳过，不影响其余题目
+- 即使 PDF 排版失败，也保证交付 Markdown 版本
+
+### 划选修订
+
+- 任务完成后，在整卷预览中划选任意范围，在所选位置下方写一句反馈提交
+- 同一个出卷 agent 携带全部历史记录直接续跑改卷——是"改"这份卷子，不是重新出一套
+- 每轮修订的前后版本自动留档，可随时回溯
+
+### 偏好沉淀
+
+- 修订反馈可勾选沉淀为课程级出题偏好（同校同课程生效）
+- 之后出同一门课的试卷时自动应用这些偏好，越用越贴合课程风格
 
 ---
 
@@ -92,327 +52,48 @@ paper_revision 表留存会话记录与前后快照（可回溯）
 
 ### 环境要求
 
-- Python ≥ 3.12
-- PostgreSQL 16（需启用 pgvector 扩展）
-- [uv](https://docs.astral.sh/uv/) 包管理器
+- Python ≥ 3.12 与 [uv](https://docs.astral.sh/uv/) 包管理器
+- PostgreSQL 16（需 pgvector 扩展；推荐用仓库内置的 Docker Compose 启动）
 - Node.js + npm（前端，可选）
 
-### 1. 克隆仓库
+### 启动后端
 
 ```bash
-git clone https://github.com/<owner>/knowledge2exam.git
+git clone https://github.com/pykelysia/knowledge2exam.git
 cd knowledge2exam
-```
 
-### 2. 配置环境变量
-
-```bash
+# 1. 配置环境变量（各项含义见文件内注释；关键项：DATABASE_URL / LLM_API_KEY，生产环境还需 JWT_SECRET）
 cp .env.example .env
-```
 
-按需修改 `.env`，关键配置项：
-
-```env
-DEBUG_MODE=false
-
-# 数据库（默认使用 docker-compose 启动的 5433 端口）
-DATABASE_URL=postgresql+asyncpg://USER:PASSWORD@localhost:5433/knowledge2exam
-
-# JWT
-JWT_SECRET=your-jwt-secret-here
-ACCESS_TOKEN_EXPIRE_MINUTES=15
-REFRESH_TOKEN_EXPIRE_DAYS=30
-
-# 存储与跨域
-STORAGE_DIR=./storage
-CORS_ORIGINS=["http://localhost:5173","http://localhost:3000"]
-
-# LLM（OpenAI 兼容协议）
-LLM_API_KEY=sk-your-api-key
-LLM_BASE_URL=https://api.openai.com/v1
-
-# 出卷 agent
-AGENT_MODEL=gpt-4o
-
-# Embedding（OpenAI 兼容 embeddings 协议）
-EMBEDDING_API_KEY=sk-your-embedding-api-key
-EMBEDDING_BASE_URL=https://api.openai.com/v1
-EMBEDDING_MODEL=text-embedding-3-small
-EMBEDDING_DIMENSIONS=1536
-```
-
-### 3. 启动数据库
-
-```bash
+# 2. 启动数据库（内置 pgvector 的 PostgreSQL，默认映射到本机 5433 端口）
 docker compose up -d db
-# 等待健康检查通过（约 3-5 秒）
-docker compose ps
-```
 
-### 4. 安装依赖
-
-```bash
+# 3. 安装依赖并执行数据库迁移
 uv sync
-```
-
-### 5. 运行数据库迁移
-
-```bash
 uv run alembic upgrade head
-```
 
-### 6. 启动开发服务器
-
-```bash
+# 4. 启动开发服务器
 uv run uvicorn app.main:app --reload --port 8000
 ```
 
-服务将在 `http://localhost:8000` 启动，API 文档见 `http://localhost:8000/docs`。
+服务运行在 `http://localhost:8000`，API 文档见 `http://localhost:8000/docs`。
 
-> **部署约束**：SSE 实时推送与任务取消依赖进程内状态（事件订阅队列、asyncio 任务注册表），
-> 当前仅支持**单进程单 worker** 部署（默认 `uvicorn app.main:app`）。多 worker 部署会导致
-> 事件推送丢失，需先引入跨进程事件通道（如 Redis pub/sub）。生产环境启动前必须配置
-> `JWT_SECRET`（非默认值），服务会在启动时校验；服务重启时会把遗留的非终态任务定格为
-> `failed`（`SERVER_RESTARTED`）。
-
-### 7. 前端（可选）
+### 启动前端（可选）
 
 ```bash
 cd frontend
 cp .env.example .env
-npm install
-npm run dev
-```
-
-前端开发服务运行在 `http://localhost:3000`，`/api` 请求由 Vite 代理转发到后端 8000 端口。
-
----
-
-## 项目结构
-
-```
-app/
-├── main.py                     # FastAPI 入口（挂载 /api/v1 路由）
-├── config.py                   # 配置加载（pydantic-settings）
-│
-├── api/                        # ── 接入层 ──
-│   ├── auth.py                 # 注册 / 登录 / 刷新 / 登出（Cookie 双 JWT）
-│   ├── uploads.py              # 资料上传（文件 / 文本）与删除
-│   ├── jobs.py                 # 任务创建 / 详情 / SSE 进度流 / 取消 / 删除
-│   ├── revisions.py            # 划选反馈修订提交与会话历史
-│   ├── artifacts.py            # paper.md（含进行中预览）/ paper.pdf 下载
-│   └── catalog.py              # 学校 / 课程列表
-│
-├── orchestration/              # ── 编排层 ──
-│   ├── state_machine.py        # 任务状态与流转合法性校验
-│   ├── stages.py               # 管线主体：预处理 → agent → 入库 → 终态
-│   ├── revision.py             # 修订编排：轮次创建、后台续跑、快照比对
-│   ├── integration.py          # ExamResult（蓝图）批量入库
-│   └── events.py               # 兼容 re-export（EventBus 本体在 core/events.py）
-│
-├── agents/                     # ── Agent 层（单个 ReAct agent）──
-│   ├── agent.py                # 入口 run_exam_agent：生成 / 修订双分支
-│   ├── intent.py               # 用户文本 → ExamIntent 意图提取
-│   ├── tools.py                # 7 个工具（todo / 检索 / 技能 / 文件 / 渲染）
-│   ├── skills.py               # SKILL.md 技能加载器
-│   ├── workspace.py            # 对象存储上的受控工作区文件面
-│   ├── schemas.py              # ExamIntent / RevisionDirective / ExamResult 等契约
-│   ├── llm.py                  # ChatOpenAI 工厂
-│   └── prompts/                # 提示词模板（system / revise_system / intent）
-│
-├── ingestion/                  # ── 能力层：入 ──
-│   ├── parsers/                # 格式解析器（pdf / docx / pptx / image / text）
-│   ├── ocr.py                  # 视觉 LLM OCR
-│   ├── chunking.py             # 文本切块
-│   ├── embedding.py            # 向量嵌入
-│   └── postprocess.py          # 图片后处理
-│
-├── retrieval/                  # ── 能力层：检索 ──
-│   ├── vector_store.py         # pgvector 向量库
-│   ├── filters.py              # 检索过滤策略
-│   └── past_papers.py          # 往期试卷处理
-│
-├── rendering/                  # ── 能力层：产出 ──
-│   ├── markdown.py             # 渲染前清洗（sanitize_markdown）
-│   ├── renderer.py             # Pandoc + XeLaTeX 渲染（缺依赖降级）
-│   └── setup.py                # 渲染依赖自动安装
-│
-├── models/                     # SQLAlchemy ORM（user / auth / catalog / upload /
-│                               # resource / chunk / job / plan / revision）
-├── schemas/                    # Pydantic 请求 / 响应模型（auth / upload / job /
-│                               # revision / catalog / common）
-├── core/                       # 基础设施（db / security / storage / events /
-│                               # exceptions / deps / enums / seed / debug_log /
-│                               # task_registry）
-
-skills/                         # agent 技能目录（exam-authoring / latex-rendering）
-scripts/                        # 辅助脚本（clear_db.sh 清空数据表）
-alembic/                        # 数据库迁移（Alembic）
-tests/                          # 测试（agents / orchestration / ingestion /
-                                # rendering / retrieval）
-frontend/                       # 前端项目（React 19 + TypeScript + Vite）
-docs/                           # 文档目录
-```
-
----
-
-## API 速览
-
-所有接口挂载在 `/api/v1` 前缀下，Swagger UI 位于 `/docs`。
-
-| 模块 | 路径 | 说明 |
-|------|------|------|
-| 认证 | `/api/v1/auth` | 注册 / 登录 / 刷新 / 登出（httpOnly Cookie 双 JWT） |
-| 上传 | `/api/v1/uploads` | 文件（multipart）或文本（JSON）上传；删除 |
-| 任务 | `/api/v1/jobs` | 列表 / 创建 / 详情 / SSE 进度流 / 取消 / 删除 |
-| 产物 | `/api/v1/jobs/{id}/paper.md`、`/paper.pdf` | 试卷产物（md 支持任务进行中渐进预览） |
-| 修订 | `/api/v1/jobs/{id}/revisions` | 划选反馈修订（POST 提交 / GET 会话历史） |
-| 学校/课程 | `/api/v1/schools` | 学校列表 / 课程列表（可选：同校同课程共享知识库） |
-
-创建任务（`POST /api/v1/jobs`）参数：
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `upload_ids` | UUID 列表 | 关联的上传资料 |
-| `school_id` / `course_id` | UUID，可选 | 学校与课程 |
-| `duration_minutes` | int，5–300，默认 100 | 目标考试时长（分钟） |
-| `need_explanation` | bool，默认 false | 是否生成答案解析 |
-
-**SSE 事件类型**（`GET /api/v1/jobs/{id}/events`）：
-
-`stage_changed` / `plan_ready` / `progress` / `warning` / `error` / `revision_started` / `revision_done` / `revision_failed` / `done`
-
-事件持久化在 `job_stage` 表并带单调递增 `seq`；断线重连时服务端按 `Last-Event-ID` 补发历史事件。
-
----
-
-## 任务状态机
-
-试卷生成任务共 8 个状态：
-
-```
-pending → preprocessing → generating → rendering → completed
-                                                     ↘ partially_completed
-```
-
-合法流转（`app/orchestration/state_machine.py`）：
-
-- `pending` → `preprocessing` / `cancelled`
-- `preprocessing` → `generating` / `failed` / `cancelled`
-- `generating` → `rendering` / `failed` / `cancelled`
-- `rendering` → `completed` / `partially_completed` / `failed` / `cancelled`
-
-行为要点：
-
-- `generating` 覆盖 agent 工作全程：蓝图规划（todo）、整卷直写 output/paper.md 均在其中完成
-- 管线意外异常时任务定格 `failed`（`error_code=PIPELINE_FAILED`），并推送 `error` + `done` 事件
-- PDF 渲染失败不导致 `failed`：重试超限后任务以 `partially_completed` 结束，仅交付 paper.md，并携带 `RENDER_FAILED` warning
-- 某题实在无法产出时 agent 在蓝图中以「[已放弃] <原因>」标记该题并继续，不影响其余题目
-
-### 划选反馈修订
-
-任务进入 `completed` / `partially_completed` 后，可在前端整卷预览中划选任意范围，
-在所选位置下方的反馈框中撰写要求并提交：
-
-- 后端把「划选锚点（选中文本 + 前后文）+ 反馈 + 全部历史轮次」交回**同一个 agent**
-  （全套 7 工具、零裁剪）续跑，直接修改 `output/paper.md` 并重渲染 PDF——不是重新出题；
-- 每轮落一行 `paper_revision`（会话记录），留存修订前后的试卷全文快照，可回溯；
-- 同一任务同时只允许一轮修订在跑（409 `REVISION_IN_PROGRESS`）；
-- 修订不改变任务状态；进度经 `revision_started` / `revision_done` / `revision_failed` 事件推送，
-  前端在修订期间以轮询兜底。
-
----
-
-## 前端
-
-前端项目位于 `frontend/` 目录：
-
-- **技术栈**：React 19 + TypeScript + Vite 8 + Tailwind CSS 4 + react-router 7 + axios，自研轻量 UI 组件，oxlint 检查
-- **页面**：Dashboard（创建任务）/ Jobs（任务历史）/ JobDetail（SSE 实时进度 + 整卷 Markdown 预览 + 划选修订 + 修订历史）/ Login / Register
-- **SSE 消费**：原生 `EventSource` 订阅任务事件流，断线由浏览器自动重连（携带 Last-Event-ID），异常时降级为轮询任务详情；修订进行中轮询会话状态兜底
-
-```bash
-cd frontend
 npm install
 npm run dev        # http://localhost:3000
 ```
 
-`frontend/.env` 仅一个可选项 `VITE_API_BASE_URL`：留空时走 Vite 代理（`/api` → `http://localhost:8000`）；跨域直连部署时填后端完整地址。
+> **部署提示**：生产环境必须将 `JWT_SECRET` 配置为非默认值；当前仅支持单进程单 worker 部署
+> （SSE 推送依赖进程内状态）。完整说明见[开发指南](docs/DEVELOPMENT.md)。
 
 ---
 
-## 开发
+## 了解更多
 
-### 代码质量
-
-```bash
-# 格式检查
-uv run ruff check app/
-
-# 前端 lint
-cd frontend && npm run lint
-
-# 测试
-uv run pytest
-```
-
-### 数据库迁移
-
-```bash
-# 生成迁移
-uv run alembic revision --autogenerate -m "描述"
-
-# 执行迁移
-uv run alembic upgrade head
-
-# 回滚
-uv run alembic downgrade -1
-```
-
-### 清空数据表
-
-```bash
-# 清空任务相关表（job / job_stage / job_upload / plan_item）
-./scripts/clear_db.sh tasks
-
-# 清空全部业务表（保留 alembic_version）
-./scripts/clear_db.sh all
-```
-
-### 环境变量说明
-
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
-| `DATABASE_URL` | 数据库连接字符串 | `postgresql+asyncpg://localhost/knowledge2exam` |
-| `JWT_SECRET` | JWT 签名密钥（生产环境必须覆盖） | 内置开发密钥 |
-| `JWT_ALGORITHM` | JWT 签名算法 | `HS256` |
-| `ACCESS_TOKEN_EXPIRE_MINUTES` | Access Token 有效期（分钟） | 15 |
-| `REFRESH_TOKEN_EXPIRE_DAYS` | Refresh Token 有效期（天） | 30 |
-| `COOKIE_SECURE` | Cookie 仅 HTTPS 传输（生产环境必须设为 true） | `false` |
-| `COOKIE_SAMESITE` | Cookie SameSite 策略（`lax` / `strict` / `none`） | `lax` |
-| `COOKIE_DOMAIN` | Cookie 域名（跨子域部署时配置，如 `.example.com`） | — |
-| `COOKIE_ACCESS_TOKEN_MAX_AGE` | Access Cookie 存活秒数 | 900 |
-| `COOKIE_REFRESH_TOKEN_MAX_AGE` | Refresh Cookie 存活秒数 | 2592000 |
-| `STORAGE_DIR` | 对象存储（产物）目录 | `./storage` |
-| `MAX_UPLOAD_SIZE_BYTES` | 单文件上传上限（字节） | 52428800（50 MB） |
-| `CORS_ORIGINS` | 允许的跨域来源 | `["http://localhost:5173","http://localhost:3000"]` |
-| `LLM_API_KEY` | LLM API 密钥（OpenAI 兼容） | — |
-| `LLM_BASE_URL` | LLM 接口地址 | `http://localhost:8000/v1` |
-| `AGENT_MODEL` | 出卷 agent 模型 | `gpt-4o` |
-| `AGENT_TEMPERATURE` | 采样温度 | 0.7 |
-| `AGENT_REASONING_EFFORT` | 推理模型思考深度（`none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`），留空不发送；仅推理模型支持 | — |
-| `AGENT_RECURSION_LIMIT` | ReAct 循环最大步数 | 100 |
-| `AGENT_MAX_RETRIES` | 单题校验失败重试上限（超限放弃该题） | 3 |
-| `AGENT_MAX_RENDER_RETRIES` | 整卷渲染失败重试上限 | 3 |
-| `SKILLS_DIR` | agent 技能目录 | `./skills` |
-| `MAX_COURSE_PREFERENCES` | 单课程偏好条数上限（超限不再沉淀并告警） | 50 |
-| `EMBEDDING_API_KEY` | 嵌入模型 API 密钥 | — |
-| `EMBEDDING_BASE_URL` | 嵌入接口地址 | `https://api.openai.com/v1` |
-| `EMBEDDING_MODEL` | 嵌入模型 | `text-embedding-3-small` |
-| `EMBEDDING_DIMENSIONS` | 嵌入维度 | 1536 |
-| `CHUNK_SIZE` | 文本切块大小（字符） | 700 |
-| `CHUNK_OVERLAP` | 相邻切块重叠（字符） | 100 |
-| `MAX_KEYPOINT_LIST_CHARS` | 重点清单长度上限（字符） | 3000 |
-| `MAX_EXTRA_REQUIREMENT_CHARS` | 额外要求长度上限（字符） | 2000 |
-| `OCR_MODEL` | 视觉 LLM OCR 模型 | `gpt-4o` |
-| `DEBUG_MODE` | 调试日志开关（仅开发环境） | `false` |
+- [系统架构与技术设计](docs/ARCHITECTURE.md) — 架构图、分层结构、项目结构、任务状态机、API 速览、技术栈
+- [开发指南](docs/DEVELOPMENT.md) — 环境变量全表、代码质量、数据库迁移、前端开发、部署约束
+- [openapi.yaml](docs/openapi.yaml) — API 契约（运行后也可访问 `/docs` 查看交互式文档）
