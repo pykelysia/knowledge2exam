@@ -71,6 +71,11 @@ class FakeSessionFactory:
         self._sessions = list(sessions)
         self.created: list[FakeSession] = []
 
+    @property
+    def sessions(self) -> list[FakeSession]:
+        """尚未取出的会话队列（测试预置 rowcount 用）。"""
+        return self._sessions
+
     def __call__(self) -> _Ctx:
         session = self._sessions.pop(0)
         self.created.append(session)
@@ -142,7 +147,7 @@ def _patch_common(
     monkeypatch.setattr(pipeline, "EmbeddingClient", FakeEmbedder)
     monkeypatch.setattr(pipeline, "PgVectorStore", FakeVectorStore)
     # 预置条件 UPDATE 的 rowcount（0=行已被软删除）
-    main = factory._sessions[0] if factory._sessions else factory.created[0]
+    main = factory.sessions[0] if factory.sessions else factory.created[0]
     if not persistable:
         main._exec_rowcounts = [0]
 
@@ -229,12 +234,20 @@ class TestParseUpload:
         upload = _make_upload()
         main = FakeSession(get_value=upload)
         factory = FakeSessionFactory([main])
+        deleted_keys: list[str] = []
+
+        async def _fake_delete(key: str) -> None:
+            deleted_keys.append(key)
+
         _patch_common(monkeypatch, factory, persistable=False)
+        monkeypatch.setattr(pipeline.storage, "delete", _fake_delete)
 
         await pipeline.parse_upload(upload.id)
 
         assert main.rollbacks >= 1
         # 仅允许初始 parsing 状态的那次提交；产物收敛不得提交
         assert main.commits == 1
+        # 已落盘的解析产物被尽力清理（防孤儿文件）
+        assert deleted_keys == [f"uploads/{upload.id}/parsed/text.json"]
         # ORM 对象状态不应被就地改为 succeeded（收敛仅经条件 UPDATE）
         assert upload.parse_status == "parsing"

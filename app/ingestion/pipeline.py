@@ -206,8 +206,12 @@ async def _persist_artifacts(
         .execution_options(synchronize_session=False)
     )
     if result.rowcount == 0:
-        # 解析期间行已被软删除：丢弃本事务全部写入
+        # 解析期间行已被软删除：丢弃本事务全部写入，并尽力清理已落盘的解析产物
         await db.rollback()
+        try:
+            await storage.delete(parsed_key)
+        except Exception:  # noqa: BLE001
+            logger.warning("孤儿解析产物清理失败（key=%s）", parsed_key, exc_info=True)
         return
     await db.commit()
 

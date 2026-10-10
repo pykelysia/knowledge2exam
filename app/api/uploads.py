@@ -328,12 +328,12 @@ async def update_upload(
         )
 
     visibility = payload.visibility if "visibility" in provided else upload.visibility
-    if "school_id" in provided:
-        upload.school_id = payload.school_id
-    if "course_id" in provided:
-        upload.course_id = payload.course_id
-
-    await _validate_tags(db, user, upload.school_id, upload.course_id, visibility)
+    # 先算目标值并校验，通过后再写 ORM（避免校验失败留下脏对象依赖会话隐式回滚）
+    new_school = payload.school_id if "school_id" in provided else upload.school_id
+    new_course = payload.course_id if "course_id" in provided else upload.course_id
+    await _validate_tags(db, user, new_school, new_course, visibility)
+    upload.school_id = new_school
+    upload.course_id = new_course
     if "visibility" in provided:
         upload.visibility = visibility
 
@@ -368,7 +368,7 @@ async def delete_upload(
     if in_use is not None:
         raise UploadInUse()
 
-    # 取消在途解析（管线内的软删除检查点会丢弃未提交产物）
+    # 取消在途解析；收敛用条件 UPDATE（WHERE deleted_at IS NULL）会丢弃其未提交产物
     cancel_task(upload_id)
 
     upload.deleted_at = datetime.now(UTC)
@@ -524,12 +524,14 @@ async def preview_file(
         text = upload.raw_text or ""
     else:
         key = upload.parsed_key or parsed_text_key(upload.id)
-    try:
-        raw = await storage.get(key)
-        text = json.loads(raw.decode("utf-8"))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("读取解析产物失败（upload=%s key=%s）", upload_id, key, exc_info=True)
-        raise UploadNotParsed("解析产物缺失或不可读，无法预览") from exc
+        try:
+            raw = await storage.get(key)
+            text = json.loads(raw.decode("utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "读取解析产物失败（upload=%s key=%s）", upload_id, key, exc_info=True
+            )
+            raise UploadNotParsed("解析产物缺失或不可读，无法预览") from exc
 
     limit = settings.max_preview_chars
     truncated = len(text) > limit
