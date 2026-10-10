@@ -33,7 +33,6 @@ from app.core.exceptions import (
     AppException,
     CourseNotFound,
     ErrorCode,
-    SchoolNotFound,
     ShareScopeRequired,
     UploadInUse,
     UploadNotFound,
@@ -113,15 +112,16 @@ def _form_uuid(value: str | None, field: str) -> uuid.UUID | None:
 
 async def _validate_tags(
     db: AsyncSession,
+    user: AppUser,
     school_id: uuid.UUID | None,
     course_id: uuid.UUID | None,
     visibility: Visibility,
 ) -> None:
-    """标签存在性校验 + 本校可见必须有学校。"""
-    if visibility == Visibility.school and school_id is None:
-        raise ShareScopeRequired("本校可见的文件必须选择学校")
-    if school_id is not None and await db.get(School, school_id) is None:
-        raise SchoolNotFound()
+    """标签校验：学校标签锁定为本人注册学校；本校共享必须挂注册学校。"""
+    if school_id is not None and school_id != user.school_id:
+        raise ShareScopeRequired("学校标签只能是注册学校；如需更改请先修改个人资料")
+    if visibility == Visibility.school and (user.school_id is None or school_id is None):
+        raise ShareScopeRequired("本校共享需要先在个人资料中设置学校归属")
     if course_id is not None and await db.get(Course, course_id) is None:
         raise CourseNotFound()
 
@@ -198,7 +198,7 @@ async def create_upload(
         course_id = _form_uuid(form.get("course_id"), "course_id")
 
         source_type = _file_source_type(str(source_type_raw))
-        await _validate_tags(db, school_id, course_id, visibility)
+        await _validate_tags(db, user, school_id, course_id, visibility)
         filename = getattr(file, "filename", None) or "upload"
         data = await _read_capped(file, settings.max_upload_size_bytes)
 
@@ -333,7 +333,7 @@ async def update_upload(
     if "course_id" in provided:
         upload.course_id = payload.course_id
 
-    await _validate_tags(db, upload.school_id, upload.course_id, visibility)
+    await _validate_tags(db, user, upload.school_id, upload.course_id, visibility)
     if "visibility" in provided:
         upload.visibility = visibility
 

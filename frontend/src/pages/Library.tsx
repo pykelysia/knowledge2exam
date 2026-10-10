@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
   AlertCircle,
-  Check,
   ChevronLeft,
   ChevronRight,
   Eye,
@@ -15,7 +14,6 @@ import {
   X,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Label } from '@/components/ui/label'
 import { Select } from '@/components/ui/select'
 import { Card, CardContent, CardHeader, CardIcon, CardTitle } from '@/components/ui/card'
 import { Spinner } from '@/components/ui/spinner'
@@ -25,7 +23,14 @@ import { uploadFile, patchUpload, deleteUpload } from '@/api/uploads'
 import { listMyFiles, unsavePoolFile } from '@/api/files'
 import { listCourses, listSchools } from '@/api/schools'
 import { extractApiError } from '@/api/client'
-import type { LibraryFile, School, Course, SourceTypeFile, Visibility } from '@/api/types'
+import { useAuth } from '@/hooks/useAuth'
+import type {
+  LibraryFile,
+  School,
+  Course,
+  SourceTypeFile,
+  Visibility,
+} from '@/api/types'
 import {
   FILE_SOURCE_TYPES,
   FILE_STATUS_META,
@@ -35,11 +40,13 @@ import {
   isAllowedExtension,
 } from '@/lib/constants'
 
-/** 待上传队列项：选择后立即上传，解析在后台进行。 */
+/** 待上传队列项：选择后先配置标签，点击上传按钮才真正提交。 */
 interface PendingItem {
   id: string
   file: File
   sourceType: SourceTypeFile
+  visibility: Visibility
+  courseId: string
   uploading: boolean
   error?: string
 }
@@ -53,6 +60,7 @@ function nextId() {
 const PAGE_SIZE = 50
 
 export function Library() {
+  const { user } = useAuth()
   const [files, setFiles] = useState<LibraryFile[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
@@ -60,21 +68,21 @@ export function Library() {
   const [error, setError] = useState<string | null>(null)
   const [previewId, setPreviewId] = useState<string | null>(null)
 
-  // 上传设置（对本批上传的文件统一生效）
-  const [sourceType, setSourceType] = useState<SourceTypeFile>('book')
-  const [visibility, setVisibility] = useState<Visibility>('private')
-  const [schoolId, setSchoolId] = useState('')
-  const [courseId, setCourseId] = useState('')
-  const [schools, setSchools] = useState<School[]>([])
-  const [courses, setCourses] = useState<Course[]>([])
-
   const [pending, setPending] = useState<PendingItem[]>([])
   const [dragging, setDragging] = useState(false)
+  const [uploadingAny, setUploadingAny] = useState(false)
+
+  const [schools, setSchools] = useState<School[]>([])
+  const [courses, setCourses] = useState<Course[]>([])
 
   const schoolsRef = useRef(schools)
   const coursesRef = useRef(courses)
   schoolsRef.current = schools
   coursesRef.current = courses
+
+  // 学校标签锁定为注册学校；未设置则不可使用本校共享
+  const userSchoolId = user?.school_id ?? null
+  const userSchoolName = schools.find((s) => s.school_id === userSchoolId)?.name ?? null
 
   const schoolName = useCallback(
     (id?: string | null) => schoolsRef.current.find((s) => s.school_id === id)?.name,
@@ -124,42 +132,56 @@ export function Library() {
     setPending((prev) => prev.map((it) => (it.id === id ? { ...it, ...patch } : it)))
   }
 
-  async function startUpload(item: PendingItem) {
-    updatePending(item.id, { uploading: true, error: undefined })
-    try {
-      await uploadFile(item.file, item.sourceType, visibility, schoolId || null, courseId || null)
-      updatePending(item.id, { uploading: false })
-      // 新文件按创建时间排最前，回第一页立即可见
-      await refresh(1)
-      setTimeout(() => {
-        setPending((prev) => prev.filter((x) => x.id !== item.id))
-      }, 1500)
-    } catch (err) {
-      const apiErr = extractApiError(err)
-      updatePending(item.id, {
-        uploading: false,
-        error: apiErr ? errorMessage(apiErr.error_code) : '上传失败',
-      })
-    }
-  }
-
   function addFiles(list: FileList | File[]) {
-    if (visibility === 'school' && !schoolId) {
-      setError(errorMessage('SHARE_SCOPE_REQUIRED'))
-      return
-    }
     setError(null)
     const next: PendingItem[] = []
     Array.from(list).forEach((file) => {
-      const id = nextId()
-      if (!isAllowedExtension(file.name)) {
-        next.push({ id, file, sourceType, uploading: false, error: '不支持的文件格式' })
-        return
+      const item: PendingItem = {
+        id: nextId(),
+        file,
+        sourceType: 'book',
+        visibility: 'private',
+        courseId: '',
+        uploading: false,
       }
-      next.push({ id, file, sourceType, uploading: false })
+      if (!isAllowedExtension(file.name)) {
+        item.error = '不支持的文件格式'
+      }
+      next.push(item)
     })
     setPending((prev) => [...prev, ...next])
-    next.filter((it) => !it.error).forEach((it) => void startUpload(it))
+  }
+
+  /** 显式上传：逐文件按各自标签提交，成功项移出队列并刷新个人库。 */
+  async function handleUploadAll() {
+    setError(null)
+    setUploadingAny(true)
+    try {
+      for (const item of pending) {
+        if (item.error) continue
+        updatePending(item.id, { uploading: true, error: undefined })
+        try {
+          await uploadFile(
+            item.file,
+            item.sourceType,
+            item.visibility,
+            userSchoolId,
+            item.courseId || null,
+          )
+          setPending((prev) => prev.filter((x) => x.id !== item.id))
+        } catch (err) {
+          const apiErr = extractApiError(err)
+          updatePending(item.id, {
+            uploading: false,
+            error: apiErr ? errorMessage(apiErr.error_code) : '上传失败',
+          })
+        }
+      }
+      // 新文件按创建时间排最前，回第一页立即可见
+      await refresh(1)
+    } finally {
+      setUploadingAny(false)
+    }
   }
 
   async function handleDelete(file: LibraryFile) {
@@ -194,6 +216,7 @@ export function Library() {
   const ownFiles = useMemo(() => files.filter((f) => !f.imported), [files])
   const savedFiles = useMemo(() => files.filter((f) => f.imported), [files])
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
+  const uploadableCount = pending.filter((it) => !it.error && !it.uploading).length
 
   const renderFileRow = (file: LibraryFile) => {
     const dead = file.status === 'deleted'
@@ -317,59 +340,22 @@ export function Library() {
           <CardTitle>上传文件</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="grid grid-cols-2 gap-4 max-[720px]:grid-cols-1">
-            <div>
-              <Label htmlFor="lib-source-type">内容类型</Label>
-              <Select
-                id="lib-source-type"
-                value={sourceType}
-                onChange={(e) => setSourceType(e.target.value as SourceTypeFile)}
-              >
-                {FILE_SOURCE_TYPES.map((t) => (
-                  <option key={t} value={t}>
-                    {SOURCE_TYPE_META[t].label}
-                  </option>
-                ))}
-              </Select>
-            </div>
-            <div>
-              <Label htmlFor="lib-visibility">可见性</Label>
-              <Select
-                id="lib-visibility"
-                value={visibility}
-                onChange={(e) => setVisibility(e.target.value as Visibility)}
-              >
-                <option value="private">私有（仅自己可见）</option>
-                <option value="school">本校共享（同校可见）</option>
-                <option value="public">公开池（所有人可见）</option>
-              </Select>
-            </div>
-            <div>
-              <Label htmlFor="lib-school">学校标签（可选）</Label>
-              <Select id="lib-school" value={schoolId} onChange={(e) => setSchoolId(e.target.value)}>
-                <option value="">不设置</option>
-                {schools.map((s) => (
-                  <option key={s.school_id} value={s.school_id}>
-                    {s.name}
-                  </option>
-                ))}
-              </Select>
-            </div>
-            <div>
-              <Label htmlFor="lib-course">课程标签（可选）</Label>
-              <Select id="lib-course" value={courseId} onChange={(e) => setCourseId(e.target.value)}>
-                <option value="">不设置</option>
-                {courses.map((c) => (
-                  <option key={c.course_id} value={c.course_id}>
-                    {c.name}
-                  </option>
-                ))}
-              </Select>
-            </div>
+          {/* 学校标签锁定为注册学校 */}
+          <div className="rounded-[10px] border border-slate-200 bg-slate-50/60 px-3.5 py-2.5">
+            <span className="text-[12.5px] text-slate-500">学校标签：</span>
+            <span className="text-[13px] font-medium text-slate-800">
+              {userSchoolName ?? '未设置'}
+            </span>
+            {userSchoolId ? (
+              <span className="ml-2 text-[11.5px] text-slate-400">
+                （注册时确定，所有上传自动携带；如需更换请先修改个人资料）
+              </span>
+            ) : (
+              <span className="ml-2 text-[11.5px] text-amber-600">
+                （未设置学校：上传不带学校标签，也不能使用「本校共享」）
+              </span>
+            )}
           </div>
-          {visibility === 'school' && !schoolId && (
-            <p className="text-[12.5px] text-amber-600">本校共享需要先选择学校标签。</p>
-          )}
 
           <label
             className={`group flex cursor-pointer flex-col items-center justify-center rounded-xl border-[1.5px] border-dashed px-4 py-[26px] text-center transition-[border-color,background-color,box-shadow] ${
@@ -399,7 +385,7 @@ export function Library() {
               <b className="font-semibold text-slate-900">点击选择文件</b>，或将文件拖拽到此处
             </span>
             <span className="mt-1.5 text-xs leading-relaxed text-slate-400">
-              上传后自动解析进知识库，生成试卷时可直接选用（支持 docx / pptx / pdf / md / txt / 图片）
+              选择后先配置标签，点击「上传」才开始上传与解析（支持 docx / pptx / pdf / md / txt / 图片）
             </span>
             <input
               type="file"
@@ -414,37 +400,101 @@ export function Library() {
           </label>
 
           {pending.length > 0 && (
-            <ul className="space-y-2">
-              {pending.map((it) => (
-                <li
-                  key={it.id}
-                  className="flex items-center gap-3 rounded-[10px] border border-slate-200 bg-white px-3 py-2"
-                >
-                  <span className="grid h-[30px] w-[30px] flex-none place-items-center rounded-lg bg-slate-100 text-slate-600">
-                    <FileText className="h-[15px] w-[15px]" />
-                  </span>
-                  <span className="min-w-0 flex-1 truncate text-[13px] text-slate-700">
-                    {it.file.name}
-                  </span>
-                  {it.uploading && <Spinner className="h-4 w-4 flex-none" />}
-                  {!it.uploading && !it.error && (
-                    <span className="flex flex-none items-center gap-1 text-xs text-emerald-600">
-                      <Check className="h-3.5 w-3.5" />
-                      已上传
-                    </span>
-                  )}
-                  {it.error && <span className="flex-none text-xs text-red-600">{it.error}</span>}
-                  <button
-                    type="button"
-                    onClick={() => setPending((prev) => prev.filter((x) => x.id !== it.id))}
-                    className="grid h-7 w-7 flex-none place-items-center rounded-[7px] text-slate-400 transition-colors hover:bg-red-50 hover:text-red-600"
-                    aria-label="移除"
+            <div className="space-y-2">
+              <ul className="space-y-2">
+                {pending.map((it) => (
+                  <li
+                    key={it.id}
+                    className="flex flex-wrap items-center gap-2.5 rounded-[10px] border border-slate-200 bg-white px-3 py-2 max-[720px]:row-gap-2"
                   >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                </li>
-              ))}
-            </ul>
+                    <span className="grid h-[30px] w-[30px] flex-none place-items-center rounded-lg bg-slate-100 text-slate-600">
+                      <FileText className="h-[15px] w-[15px]" />
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-[13px] text-slate-700">
+                      {it.file.name}
+                    </span>
+                    <Select
+                      value={it.sourceType}
+                      onChange={(e) =>
+                        updatePending(it.id, { sourceType: e.target.value as SourceTypeFile })
+                      }
+                      className="w-36 flex-none px-2 py-1.5 text-[12px]"
+                      aria-label="内容类型"
+                      disabled={it.uploading}
+                    >
+                      {FILE_SOURCE_TYPES.map((t) => (
+                        <option key={t} value={t}>
+                          {SOURCE_TYPE_META[t].label}
+                        </option>
+                      ))}
+                    </Select>
+                    <Select
+                      value={it.visibility}
+                      onChange={(e) =>
+                        updatePending(it.id, { visibility: e.target.value as Visibility })
+                      }
+                      className="w-[118px] flex-none px-2 py-1.5 text-[12px]"
+                      aria-label="可见性"
+                      disabled={it.uploading}
+                    >
+                      <option value="private">私有</option>
+                      <option value="school" disabled={!userSchoolId}>
+                        本校共享
+                      </option>
+                      <option value="public">公开池</option>
+                    </Select>
+                    <Select
+                      value={it.courseId}
+                      onChange={(e) => updatePending(it.id, { courseId: e.target.value })}
+                      className="w-32 flex-none px-2 py-1.5 text-[12px]"
+                      aria-label="课程标签"
+                      disabled={it.uploading}
+                    >
+                      <option value="">课程：不设置</option>
+                      {courses.map((c) => (
+                        <option key={c.course_id} value={c.course_id}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </Select>
+                    {it.uploading && <Spinner className="h-4 w-4 flex-none" />}
+                    {it.error && (
+                      <span className="flex-none text-xs text-red-600">{it.error}</span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setPending((prev) => prev.filter((x) => x.id !== it.id))
+                      }
+                      className="grid h-7 w-7 flex-none place-items-center rounded-[7px] text-slate-400 transition-colors hover:bg-red-50 hover:text-red-600"
+                      aria-label="移除"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+              <div className="flex items-center gap-3">
+                <Button
+                  type="button"
+                  disabled={uploadableCount === 0 || uploadingAny}
+                  onClick={() => void handleUploadAll()}
+                >
+                  {uploadingAny ? (
+                    <>
+                      <Spinner className="h-4 w-4" /> 正在上传…
+                    </>
+                  ) : (
+                    <>
+                      <UploadIcon className="h-4 w-4" /> 上传 {uploadableCount} 个文件
+                    </>
+                  )}
+                </Button>
+                <span className="text-[12px] text-slate-400">
+                  确认每个文件的内容类型与可见性后开始上传，上传后立即自动解析
+                </span>
+              </div>
+            </div>
           )}
         </CardContent>
       </Card>

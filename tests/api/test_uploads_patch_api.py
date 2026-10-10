@@ -64,13 +64,17 @@ def _make_upload(**kwargs: Any) -> Upload:
     return Upload(**defaults)
 
 
-def _client(session: FakePatchSession, user_id: uuid.UUID) -> AsyncClient:
+def _client(
+    session: FakePatchSession,
+    user_id: uuid.UUID,
+    school_id: uuid.UUID | None = None,
+) -> AsyncClient:
     async def _override_db():
         yield session
 
     app.dependency_overrides[get_db] = _override_db
     app.dependency_overrides[get_current_user] = lambda: type(
-        "U", (), {"id": user_id}
+        "U", (), {"id": user_id, "school_id": school_id}
     )()
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
@@ -121,7 +125,7 @@ class TestPatchUpload:
         session = FakePatchSession(upload)
 
         try:
-            async with _client(session, upload.user_id) as http:
+            async with _client(session, upload.user_id, school_id=_SCHOOL) as http:
                 res = await http.patch(
                     f"/api/v1/uploads/{upload.id}", json={"visibility": "school"}
                 )
@@ -131,12 +135,48 @@ class TestPatchUpload:
         assert res.status_code == 400
         assert res.json()["error_code"] == "SHARE_SCOPE_REQUIRED"
 
+    async def test_school_visibility_without_user_school_rejected(self) -> None:
+        """注册未选学校的用户不得使用本校共享。"""
+        upload = _make_upload(school_id=None)
+        session = FakePatchSession(upload)
+
+        try:
+            async with _client(session, upload.user_id, school_id=None) as http:
+                res = await http.patch(
+                    f"/api/v1/uploads/{upload.id}", json={"visibility": "school"}
+                )
+        finally:
+            _cleanup()
+
+        assert res.status_code == 400
+        assert res.json()["error_code"] == "SHARE_SCOPE_REQUIRED"
+
+    async def test_school_tag_locked_to_registered_school(self) -> None:
+        """学校标签只能改为本人注册学校，其他学校一律拒绝。"""
+        upload = _make_upload()
+        session = FakePatchSession(upload)
+        other_school = uuid.uuid4()
+
+        try:
+            async with _client(session, upload.user_id, school_id=_SCHOOL) as http:
+                res = await http.patch(
+                    f"/api/v1/uploads/{upload.id}",
+                    json={"school_id": str(other_school)},
+                )
+        finally:
+            _cleanup()
+
+        assert res.status_code == 400
+        assert res.json()["error_code"] == "SHARE_SCOPE_REQUIRED"
+        # 拒绝路径不 commit，改动不会落库（内存脏属性随会话丢弃）
+        assert session.committed == 0
+
     async def test_school_visibility_with_tag_accepted(self) -> None:
         upload = _make_upload(school_id=_SCHOOL)
         session = FakePatchSession(upload)
 
         try:
-            async with _client(session, upload.user_id) as http:
+            async with _client(session, upload.user_id, school_id=_SCHOOL) as http:
                 res = await http.patch(
                     f"/api/v1/uploads/{upload.id}", json={"visibility": "school"}
                 )
@@ -198,7 +238,7 @@ class TestPatchUpload:
         session = FakePatchSession(upload)
 
         try:
-            async with _client(session, upload.user_id) as http:
+            async with _client(session, upload.user_id, school_id=_SCHOOL) as http:
                 res = await http.patch(
                     f"/api/v1/uploads/{upload.id}",
                     json={"school_id": str(_SCHOOL), "course_id": str(_COURSE)},
@@ -212,7 +252,7 @@ class TestPatchUpload:
 
         # 显式 null 清除标签
         try:
-            async with _client(session, upload.user_id) as http:
+            async with _client(session, upload.user_id, school_id=_SCHOOL) as http:
                 res = await http.patch(
                     f"/api/v1/uploads/{upload.id}",
                     json={"school_id": None, "course_id": None},
