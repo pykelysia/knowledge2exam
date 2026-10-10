@@ -71,6 +71,8 @@ export function Library() {
   const [pending, setPending] = useState<PendingItem[]>([])
   const [dragging, setDragging] = useState(false)
   const [uploadingAny, setUploadingAny] = useState(false)
+  // 学校标签默认携带注册学校，用户可选择「不设置」（不透露/无需学校归属）
+  const [attachSchool, setAttachSchool] = useState(true)
 
   const [schools, setSchools] = useState<School[]>([])
   const [courses, setCourses] = useState<Course[]>([])
@@ -132,6 +134,18 @@ export function Library() {
     setPending((prev) => prev.map((it) => (it.id === id ? { ...it, ...patch } : it)))
   }
 
+  /** 切换是否携带学校标签：切到「不设置」时重置已选本校共享的文件为私有。 */
+  function toggleAttachSchool(attach: boolean) {
+    setAttachSchool(attach)
+    if (!attach) {
+      setPending((prev) =>
+        prev.map((it) =>
+          it.visibility === 'school' ? { ...it, visibility: 'private' } : it,
+        ),
+      )
+    }
+  }
+
   function addFiles(list: FileList | File[]) {
     setError(null)
     const next: PendingItem[] = []
@@ -165,7 +179,7 @@ export function Library() {
             item.file,
             item.sourceType,
             item.visibility,
-            userSchoolId,
+            attachSchool ? userSchoolId : null,
             item.courseId || null,
           )
           setPending((prev) => prev.filter((x) => x.id !== item.id))
@@ -340,19 +354,29 @@ export function Library() {
           <CardTitle>上传文件</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          {/* 学校标签锁定为注册学校 */}
-          <div className="rounded-[10px] border border-slate-200 bg-slate-50/60 px-3.5 py-2.5">
+          {/* 学校标签：默认注册学校，可选择不设置（对本批文件生效） */}
+          <div className="flex flex-wrap items-center gap-2.5 rounded-[10px] border border-slate-200 bg-slate-50/60 px-3.5 py-2.5">
             <span className="text-[12.5px] text-slate-500">学校标签：</span>
-            <span className="text-[13px] font-medium text-slate-800">
-              {userSchoolName ?? '未设置'}
-            </span>
             {userSchoolId ? (
-              <span className="ml-2 text-[11.5px] text-slate-400">
-                （注册时确定，所有上传自动携带；如需更换请先修改个人资料）
-              </span>
+              <>
+                <Select
+                  value={attachSchool ? 'school' : 'none'}
+                  onChange={(e) => toggleAttachSchool(e.target.value === 'school')}
+                  className="w-44 px-2 py-1.5 text-[12.5px]"
+                  aria-label="学校标签"
+                >
+                  <option value="school">{userSchoolName}（注册学校）</option>
+                  <option value="none">不设置（无学校归属）</option>
+                </Select>
+                <span className="text-[11.5px] text-slate-400">
+                  {attachSchool
+                    ? '默认携带注册学校；如需更换请先修改个人资料'
+                    : '本批文件不带学校归属，也不能使用「本校共享」'}
+                </span>
+              </>
             ) : (
-              <span className="ml-2 text-[11.5px] text-amber-600">
-                （未设置学校：上传不带学校标签，也不能使用「本校共享」）
+              <span className="text-[11.5px] text-amber-600">
+                未设置学校：上传不带学校标签，也不能使用「本校共享」
               </span>
             )}
           </div>
@@ -438,7 +462,7 @@ export function Library() {
                       disabled={it.uploading}
                     >
                       <option value="private">私有</option>
-                      <option value="school" disabled={!userSchoolId}>
+                      <option value="school" disabled={!userSchoolId || !attachSchool}>
                         本校共享
                       </option>
                       <option value="public">公开池</option>

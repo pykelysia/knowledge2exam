@@ -148,7 +148,7 @@ paths:
                 school_id:
                   type: string
                   format: uuid
-                  description: 学校标签。锁定为本人注册学校（须与其相等）；注册未选学校的用户不可携带
+                  description: 学校标签。默认携带本人注册学校（传入时须与其相等）；也可省略表示无学校归属；注册未选学校的用户不可携带
                 course_id:
                   type: string
                   format: uuid
