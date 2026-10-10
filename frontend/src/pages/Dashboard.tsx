@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react'
+import { memo, useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import {
   AlertCircle,
   Check,
@@ -25,11 +26,86 @@ import { extractApiError } from '@/api/client'
 import type { LibraryFile } from '@/api/types'
 import { FILE_STATUS_META, SOURCE_TYPE_META, errorMessage } from '@/lib/constants'
 
+// 全量拉取分页参数：page_size 必须不大于后端 /files/mine 的 le=200 上限
+const DASHBOARD_PAGE_SIZE = 200
+// 防御性上限：超过后截断（200×20=4000 个文件封顶）
+const MAX_FETCH_PAGES = 20
+
+interface FileSelectRowProps {
+  file: LibraryFile
+  checked: boolean
+  onToggle: (id: string) => void
+  onPreview: (id: string) => void
+}
+
+/** 单个可选文件行：memo 化，虚拟列表滚动时避免无关行重渲染。 */
+const FileSelectRow = memo(function FileSelectRow({
+  file,
+  checked,
+  onToggle,
+  onPreview,
+}: FileSelectRowProps) {
+  const usable = file.status === 'available'
+  const displayName = file.filename || '未命名文件'
+  return (
+    <div
+      className={`flex items-center gap-3 rounded-[10px] border px-3 py-2 transition-[border-color,box-shadow] max-[720px]:flex-wrap max-[720px]:row-gap-2 ${
+        checked
+          ? 'border-slate-900 bg-slate-50/80 shadow-card'
+          : 'border-slate-200 bg-white hover:border-slate-300'
+      } ${usable ? '' : 'opacity-60'}`}
+    >
+      <input
+        type="checkbox"
+        className="h-[15px] w-[15px] flex-none accent-slate-900"
+        disabled={!usable}
+        checked={checked}
+        onChange={() => onToggle(file.upload_id)}
+        aria-label={`选择 ${displayName}`}
+      />
+      <span className="grid h-[30px] w-[30px] flex-none place-items-center rounded-lg bg-slate-100 text-slate-600">
+        <FileText className="h-[15px] w-[15px]" />
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-[13px] text-slate-700">
+          {displayName}
+          {file.imported && (
+            <span className="ml-1.5 text-[11.5px] text-slate-400">
+              （来自 {file.owner.username}）
+            </span>
+          )}
+        </div>
+        <div className="mt-1 flex flex-wrap items-center gap-1.5">
+          <Badge>{SOURCE_TYPE_META[file.source_type].label}</Badge>
+          <Badge variant={FILE_STATUS_META[file.status].variant}>
+            {file.status === 'parsing' && <Spinner className="mr-1 h-3 w-3" />}
+            {FILE_STATUS_META[file.status].label}
+          </Badge>
+          {file.char_count != null && file.status === 'available' && (
+            <span className="text-[11.5px] text-slate-400">约 {file.char_count} 字</span>
+          )}
+        </div>
+      </div>
+      {usable && (
+        <button
+          type="button"
+          onClick={() => onPreview(file.upload_id)}
+          className="grid h-7 w-7 flex-none place-items-center rounded-[7px] text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-900"
+          aria-label={`预览 ${displayName}`}
+        >
+          <Eye className="h-4 w-4" />
+        </button>
+      )}
+    </div>
+  )
+})
+
 export function Dashboard() {
   const navigate = useNavigate()
 
   const [files, setFiles] = useState<LibraryFile[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [previewId, setPreviewId] = useState<string | null>(null)
 
@@ -41,18 +117,24 @@ export function Dashboard() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const refresh = useCallback(async () => {
+  // 防重入：轮询 3s 触发时若上一次全量拉取仍在途则跳过，避免请求堆叠
+  const refreshingRef = useRef(false)
+
+  const refresh = useCallback(async (silent = false) => {
+    if (refreshingRef.current) return
+    refreshingRef.current = true
     try {
-      // 出卷页需要全部可选文件：循环拉取个人库全部分页（上限 20 页防御）
+      // 出卷页需要全部可选文件：循环拉取个人库全部分页
       const all: LibraryFile[] = []
       let current = 1
       for (;;) {
-        const res = await listMyFiles(current, 200)
+        const res = await listMyFiles(current, DASHBOARD_PAGE_SIZE)
         all.push(...res.files)
-        if (all.length >= res.total || current >= 20) break
+        if (all.length >= res.total || current >= MAX_FETCH_PAGES) break
         current += 1
       }
       setFiles(all)
+      setLoadError(null)
       // 已删除/不可用的选中项自动移除
       setSelected((prev) => {
         const usable = new Set(
@@ -61,26 +143,33 @@ export function Dashboard() {
         const next = new Set([...prev].filter((id) => usable.has(id)))
         return next.size === prev.size ? prev : next
       })
-    } catch {
-      /* 静默，提交时校验兜底 */
+    } catch (err) {
+      // 轮询失败静默；首屏/用户操作失败给出提示，避免把加载失败伪装成空库
+      if (!silent) {
+        const apiErr = extractApiError(err)
+        setLoadError(
+          apiErr ? errorMessage(apiErr.error_code) : '个人库加载失败，请稍后重试',
+        )
+      }
     } finally {
+      refreshingRef.current = false
       setLoading(false)
     }
   }, [])
 
   useEffect(() => {
-    refresh()
+    void refresh()
   }, [refresh])
 
-  // 有解析中的文件时轮询（解析完成后即可勾选）
+  // 有解析中的文件时轮询（静默失败）
   const anyParsing = files.some((f) => f.status === 'parsing')
   useEffect(() => {
     if (!anyParsing) return
-    const timer = setInterval(refresh, 3000)
+    const timer = setInterval(() => void refresh(true), 3000)
     return () => clearInterval(timer)
   }, [anyParsing, refresh])
 
-  function toggleSelected(id: string) {
+  const toggleSelected = useCallback((id: string) => {
     setSelected((prev) => {
       const next = new Set(prev)
       if (next.has(id)) {
@@ -90,7 +179,9 @@ export function Dashboard() {
       }
       return next
     })
-  }
+  }, [])
+
+  const handlePreview = useCallback((id: string) => setPreviewId(id), [])
 
   const readyCount =
     selected.size + (manualText.trim() ? 1 : 0) + (extraRequirement.trim() ? 1 : 0)
@@ -138,6 +229,14 @@ export function Dashboard() {
     }
   }
 
+  const listRef = useRef<HTMLDivElement>(null)
+  const virtualizer = useVirtualizer({
+    count: files.length,
+    getScrollElement: () => listRef.current,
+    estimateSize: () => 76,
+    overscan: 8,
+  })
+
   return (
     <div className="space-y-6">
       <div>
@@ -159,6 +258,13 @@ export function Dashboard() {
           <CardContent className="space-y-3">
             {loading ? (
               <p className="py-6 text-center text-[13px] text-slate-400">加载中…</p>
+            ) : loadError ? (
+              <div className="space-y-3 py-6 text-center">
+                <p className="text-[13px] text-red-600">{loadError}</p>
+                <Button type="button" size="sm" variant="secondary" onClick={() => void refresh()}>
+                  重试
+                </Button>
+              </div>
             ) : files.length === 0 ? (
               <p className="py-6 text-center text-[13px] text-slate-400">
                 个人库还是空的，先去{' '}
@@ -179,66 +285,35 @@ export function Dashboard() {
               </p>
             ) : (
               <>
-                <ul className="space-y-2">
-                  {files.map((file) => {
-                    const usable = file.status === 'available'
-                    const checked = selected.has(file.upload_id)
-                    return (
-                      <li
-                        key={file.upload_id}
-                        className={`flex items-center gap-3 rounded-[10px] border px-3 py-2 transition-[border-color,box-shadow] max-[720px]:flex-wrap max-[720px]:row-gap-2 ${
-                          checked
-                            ? 'border-slate-900 bg-slate-50/80 shadow-card'
-                            : 'border-slate-200 bg-white hover:border-slate-300'
-                        } ${usable ? '' : 'opacity-60'}`}
-                      >
-                        <input
-                          type="checkbox"
-                          className="h-[15px] w-[15px] flex-none accent-slate-900"
-                          disabled={!usable}
-                          checked={checked}
-                          onChange={() => toggleSelected(file.upload_id)}
-                          aria-label={`选择 ${file.filename || '未命名文件'}`}
-                        />
-                        <span className="grid h-[30px] w-[30px] flex-none place-items-center rounded-lg bg-slate-100 text-slate-600">
-                          <FileText className="h-[15px] w-[15px]" />
-                        </span>
-                        <div className="min-w-0 flex-1">
-                          <div className="truncate text-[13px] text-slate-700">
-                            {file.filename || '未命名文件'}
-                            {file.imported && (
-                              <span className="ml-1.5 text-[11.5px] text-slate-400">
-                                （来自 {file.owner.username}）
-                              </span>
-                            )}
-                          </div>
-                          <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                            <Badge>{SOURCE_TYPE_META[file.source_type].label}</Badge>
-                            <Badge variant={FILE_STATUS_META[file.status].variant}>
-                              {file.status === 'parsing' && <Spinner className="mr-1 h-3 w-3" />}
-                              {FILE_STATUS_META[file.status].label}
-                            </Badge>
-                            {file.char_count != null && file.status === 'available' && (
-                              <span className="text-[11.5px] text-slate-400">
-                                约 {file.char_count} 字
-                              </span>
-                            )}
-                          </div>
+                {/* 虚拟化列表：大库（可达数千条）只渲染可视窗口 */}
+                <div ref={listRef} className="max-h-[520px] overflow-y-auto pr-1">
+                  <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
+                    {virtualizer.getVirtualItems().map((item) => {
+                      const file = files[item.index]
+                      return (
+                        <div
+                          key={file.upload_id}
+                          data-index={item.index}
+                          ref={(el) => virtualizer.measureElement(el)}
+                          style={{
+                            position: 'absolute',
+                            top: 0,
+                            left: 0,
+                            width: '100%',
+                            transform: `translateY(${item.start}px)`,
+                          }}
+                        >
+                          <FileSelectRow
+                            file={file}
+                            checked={selected.has(file.upload_id)}
+                            onToggle={toggleSelected}
+                            onPreview={handlePreview}
+                          />
                         </div>
-                        {usable && (
-                          <button
-                            type="button"
-                            onClick={() => setPreviewId(file.upload_id)}
-                            className="grid h-7 w-7 flex-none place-items-center rounded-[7px] text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-900"
-                            aria-label="预览"
-                          >
-                            <Eye className="h-4 w-4" />
-                          </button>
-                        )}
-                      </li>
-                    )
-                  })}
-                </ul>
+                      )
+                    })}
+                  </div>
+                </div>
                 <p className="text-[12px] text-slate-400">
                   解析中 / 失效的文件不可选用；新上传的文件解析完成后会自动出现在这里。
                   <Link to="/library" className="ml-1 text-slate-700 underline decoration-slate-300">
@@ -352,7 +427,13 @@ export function Dashboard() {
         </div>
       </form>
 
-      {previewId && <FilePreview uploadId={previewId} onClose={() => setPreviewId(null)} />}
+      {previewId && (
+        <FilePreview
+          key={previewId}
+          uploadId={previewId}
+          onClose={() => setPreviewId(null)}
+        />
+      )}
     </div>
   )
 }
