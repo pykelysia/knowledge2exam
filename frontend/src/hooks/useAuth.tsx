@@ -7,9 +7,15 @@ import {
   useState,
   type ReactNode,
 } from 'react'
-import { login as apiLogin, logout as apiLogout, refresh as apiRefresh, register as apiRegister } from '@/api/auth'
+import {
+  login as apiLogin,
+  logout as apiLogout,
+  refresh as apiRefresh,
+  register as apiRegister,
+  updateMe as apiUpdateMe,
+} from '@/api/auth'
 import { SESSION_EXPIRED_EVENT } from '@/api/client'
-import type { LoginRequest, RegisterRequest, User } from '@/api/types'
+import type { LoginRequest, RegisterRequest, User, UserUpdateRequest } from '@/api/types'
 
 interface AuthContextValue {
   /** 当前登录用户；未登录时为 null。 */
@@ -21,6 +27,8 @@ interface AuthContextValue {
   login: (payload: LoginRequest) => Promise<void>
   register: (payload: RegisterRequest) => Promise<void>
   logout: () => Promise<void>
+  /** 修改个人资料（学校归属等）并同步登录态。 */
+  updateCurrentUser: (payload: UserUpdateRequest) => Promise<void>
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
@@ -74,6 +82,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // 注册成功仅返回用户信息，不自动登录；由调用方决定是否跳转登录。
   }, [])
 
+  const updateCurrentUser = useCallback(async (payload: UserUpdateRequest) => {
+    const data = await apiUpdateMe(payload)
+    setUser(data.user)
+  }, [])
+
   const value = useMemo<AuthContextValue>(
     () => ({
       user,
@@ -82,8 +95,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       login,
       register,
       logout,
+      updateCurrentUser,
     }),
-    [user, initializing, login, register, logout],
+    [user, initializing, login, register, logout, updateCurrentUser],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

@@ -8,6 +8,7 @@ import { Register } from '@/pages/Register'
 import { Dashboard } from '@/pages/Dashboard'
 import { Library } from '@/pages/Library'
 import { Pool } from '@/pages/Pool'
+import { Profile } from '@/pages/Profile'
 import { Jobs } from '@/pages/Jobs'
 import { JobDetail } from '@/pages/JobDetail'
 import { NotFound } from '@/pages/NotFound'
@@ -26,6 +27,7 @@ export default function App() {
                 <Route path="/" element={<Dashboard />} />
                 <Route path="/library" element={<Library />} />
                 <Route path="/pool" element={<Pool />} />
+                <Route path="/profile" element={<Profile />} />
                 <Route path="/jobs" element={<Jobs />} />
                 <Route path="/jobs/:jobId" element={<JobDetail />} />
               </Route>

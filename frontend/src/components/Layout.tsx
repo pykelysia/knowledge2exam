@@ -55,12 +55,16 @@ export function Layout() {
           </div>
           <div className="flex items-center gap-3">
             {user && (
-              <span className="flex items-center gap-2 text-[13px] text-slate-700">
+              <Link
+                to="/profile"
+                className="flex items-center gap-2 rounded-lg px-2 py-1 text-[13px] text-slate-700 transition-colors hover:bg-slate-100 hover:text-slate-900"
+                aria-label="个人资料"
+              >
                 <span className="grid h-[26px] w-[26px] place-items-center rounded-full bg-gradient-to-br from-slate-700 to-slate-900 text-[11.5px] font-semibold text-white">
                   {user.username.slice(0, 1).toUpperCase()}
                 </span>
                 {user.username}
-              </span>
+              </Link>
             )}
             <button
               onClick={handleLogout}
