@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { X } from 'lucide-react'
 import { getPreview } from '@/api/files'
 import { extractApiError } from '@/api/client'
@@ -13,10 +13,14 @@ interface FilePreviewProps {
   onClose: () => void
 }
 
-/** 文件预览弹层：基于解析产物文本渲染（个人库与公开池共用）。 */
+/** 文件预览弹层：基于解析产物文本渲染（个人库与公开池共用）。
+
+ * 对话框语义：role=dialog + 初始焦点移入 + 关闭归还焦点，Esc 可关。
+ */
 export function FilePreview({ uploadId, onClose }: FilePreviewProps) {
   const [preview, setPreview] = useState<UploadPreview | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const dialogRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -43,13 +47,27 @@ export function FilePreview({ uploadId, onClose }: FilePreviewProps) {
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
+  // 弹层打开时移入初始焦点，关闭时归还给触发元素
+  useEffect(() => {
+    dialogRef.current?.focus()
+    const previous = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null
+    return () => previous?.focus()
+  }, [])
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-[2px]"
       onClick={onClose}
     >
       <div
-        className="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-2xl border border-slate-200 bg-white shadow-xl"
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={preview?.filename || '文件预览'}
+        tabIndex={-1}
+        className="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-2xl border border-slate-200 bg-white shadow-xl outline-none"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-4">

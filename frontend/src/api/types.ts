@@ -97,7 +97,8 @@ export interface LibraryFile {
   char_count?: number | null
   parse_status: ParseStatus
   parse_error?: string | null
-  parse_warnings?: { code: string; message: string }[]
+  /** 后端为自由 JSONB 字典列表，形状未在后端约束，使用时再收窄 */
+  parse_warnings?: unknown[]
   created_at: string
   owner: FileOwner
   /** 是否为公开池保存的引用（false = 本人上传） */
@@ -132,7 +133,8 @@ export interface PoolFile {
   source_type: SourceType
   filename?: string | null
   size_bytes?: number | null
-  visibility: Visibility
+  /** 池内谓词已排除 private（见后端 pool.py），联合相应收紧 */
+  visibility: Exclude<Visibility, 'private'>
   school_id?: string | null
   course_id?: string | null
   school_name?: string | null

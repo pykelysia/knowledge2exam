@@ -1,0 +1,10 @@
+{
+  "plugins": ["react", "jsx_a11y", "typescript", "unicorn", "oxc"],
+  "rules": {
+    "react/rules-of-hooks": "error",
+    "react/exhaustive-deps": "warn",
+    "jsx_a11y/alt-text": "error",
+    "jsx_a11y/label-has-associated-control": "warn",
+    "jsx_a11y/click-events-have-key-events": "warn"
+  }
+}

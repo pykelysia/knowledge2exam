@@ -77,38 +77,35 @@ export function Library() {
   const [schools, setSchools] = useState<School[]>([])
   const [courses, setCourses] = useState<Course[]>([])
 
-  const schoolsRef = useRef(schools)
-  const coursesRef = useRef(courses)
-  schoolsRef.current = schools
-  coursesRef.current = courses
+  // 过期响应守卫：翻页/轮询并发时，丢弃迟到的旧响应
+  const reqSeq = useRef(0)
 
   // 学校标签锁定为注册学校；未设置则不可使用本校共享
   const userSchoolId = user?.school_id ?? null
   const userSchoolName = schools.find((s) => s.school_id === userSchoolId)?.name ?? null
 
-  const schoolName = useCallback(
-    (id?: string | null) => schoolsRef.current.find((s) => s.school_id === id)?.name,
-    [],
-  )
-  const courseName = useCallback(
-    (id?: string | null) => coursesRef.current.find((c) => c.course_id === id)?.name,
-    [],
-  )
+  const schoolName = (id?: string | null) => schools.find((s) => s.school_id === id)?.name
+  const courseName = (id?: string | null) => courses.find((c) => c.course_id === id)?.name
 
-  const refresh = useCallback(async (targetPage: number) => {
+  const refresh = useCallback(async (targetPage: number, silent = false) => {
+    const current = ++reqSeq.current
     try {
       const res = await listMyFiles(targetPage, PAGE_SIZE)
+      if (current !== reqSeq.current) return // 已有更新请求，丢弃过期响应
       setFiles(res.files)
       setTotal(res.total)
       setPage(res.page)
-      // 当前页被删空时回退一页，避免停留在空页
+      // 当前页被删空时回退一页并重新拉取，避免停留在空视图
       if (res.files.length === 0 && res.page > 1) {
-        setPage(res.page - 1)
+        await refresh(res.page - 1, silent)
       }
-    } catch {
-      /* 轮询失败静默，下次再试 */
+    } catch (err) {
+      if (!silent && current === reqSeq.current) {
+        const apiErr = extractApiError(err)
+        setError(apiErr ? errorMessage(apiErr.error_code) : '加载失败，请稍后再试')
+      }
     } finally {
-      setLoading(false)
+      if (current === reqSeq.current) setLoading(false)
     }
   }, [])
 
@@ -119,14 +116,14 @@ export function Library() {
     listCourses()
       .then((res) => setCourses(res.courses))
       .catch(() => setCourses([]))
-    refresh(1)
+    void refresh(1)
   }, [refresh])
 
-  // 有解析中的文件时轮询刷新（保持当前页）
+  // 有解析中的文件时轮询刷新（保持当前页；轮询失败静默）
   const anyParsing = files.some((f) => f.status === 'parsing')
   useEffect(() => {
     if (!anyParsing) return
-    const timer = setInterval(() => void refresh(page), 3000)
+    const timer = setInterval(() => void refresh(page, true), 3000)
     return () => clearInterval(timer)
   }, [anyParsing, refresh, page])
 
@@ -284,7 +281,7 @@ export function Library() {
               type="button"
               onClick={() => setPreviewId(file.upload_id)}
               className="grid h-7 w-7 place-items-center rounded-[7px] text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-900"
-              aria-label="预览"
+              aria-label={`预览 ${file.filename || '未命名文件'}`}
             >
               <Eye className="h-4 w-4" />
             </button>
@@ -294,7 +291,7 @@ export function Library() {
               type="button"
               onClick={() => void handleUnsave(file)}
               className="grid h-7 w-7 place-items-center rounded-[7px] text-slate-400 transition-colors hover:bg-red-50 hover:text-red-600"
-              aria-label="取消保存"
+              aria-label={`取消保存 ${file.filename || '未命名文件'}`}
             >
               <X className="h-4 w-4" />
             </button>
@@ -306,7 +303,7 @@ export function Library() {
                   void handleVisibilityChange(file, e.target.value as Visibility)
                 }
                 className="w-[104px] flex-none px-2 py-1 text-[12px]"
-                aria-label="修改可见性"
+                aria-label={`修改可见性：${file.filename || '未命名文件'}`}
               >
                 <option value="private">私有</option>
                 <option value="school" disabled={!file.school_id}>
@@ -318,7 +315,7 @@ export function Library() {
                 type="button"
                 onClick={() => void handleDelete(file)}
                 className="grid h-7 w-7 place-items-center rounded-[7px] text-slate-400 transition-colors hover:bg-red-50 hover:text-red-600"
-                aria-label="删除"
+                aria-label={`删除 ${file.filename || '未命名文件'}`}
               >
                 <Trash2 className="h-4 w-4" />
               </button>
@@ -369,20 +366,37 @@ export function Library() {
                   <option value="none">不设置（无学校归属）</option>
                 </Select>
                 <span className="text-[11.5px] text-slate-400">
-                  {attachSchool
-                    ? '默认携带注册学校；如需更换请先修改个人资料'
-                    : '本批文件不带学校归属，也不能使用「本校共享」'}
+                  {attachSchool ? (
+                    <>
+                      默认携带注册学校；如需更换请先
+                      <Link
+                        to="/profile"
+                        className="mx-0.5 text-slate-700 underline decoration-slate-300 hover:decoration-slate-900"
+                      >
+                        修改个人资料
+                      </Link>
+                    </>
+                  ) : (
+                    '本批文件不带学校归属，也不能使用「本校共享」'
+                  )}
                 </span>
               </>
             ) : (
               <span className="text-[11.5px] text-amber-600">
-                未设置学校：上传不带学校标签，也不能使用「本校共享」
+                未设置学校：上传不带学校标签，也不能使用「本校共享」；可在
+                <Link
+                  to="/profile"
+                  className="mx-0.5 underline decoration-amber-300 hover:decoration-amber-600"
+                >
+                  个人资料
+                </Link>
+                中设置
               </span>
             )}
           </div>
 
           <label
-            className={`group flex cursor-pointer flex-col items-center justify-center rounded-xl border-[1.5px] border-dashed px-4 py-[26px] text-center transition-[border-color,background-color,box-shadow] ${
+            className={`group flex cursor-pointer flex-col items-center justify-center rounded-xl border-[1.5px] border-dashed px-4 py-[26px] text-center transition-[border-color,background-color,box-shadow] focus-within:ring-4 focus-within:ring-slate-900/10 ${
               dragging
                 ? 'border-slate-900 bg-slate-100 ring-4 ring-slate-900/[0.06]'
                 : 'border-slate-300 bg-slate-50/60 hover:border-slate-400 hover:bg-slate-50'
@@ -411,10 +425,11 @@ export function Library() {
             <span className="mt-1.5 text-xs leading-relaxed text-slate-400">
               选择后先配置标签，点击「上传」才开始上传与解析（支持 docx / pptx / pdf / md / txt / 图片）
             </span>
+            {/* sr-only：视觉隐藏但保留在 Tab 序与 label 关联内，键盘可达 */}
             <input
               type="file"
               multiple
-              className="hidden"
+              className="sr-only"
               accept=".docx,.pptx,.pdf,.md,.txt,.jpg,.jpeg,.png,.webp,.bmp"
               onChange={(e) => {
                 if (e.target.files) addFiles(e.target.files)
@@ -426,77 +441,83 @@ export function Library() {
           {pending.length > 0 && (
             <div className="space-y-2">
               <ul className="space-y-2">
-                {pending.map((it) => (
-                  <li
-                    key={it.id}
-                    className="flex flex-wrap items-center gap-2.5 rounded-[10px] border border-slate-200 bg-white px-3 py-2 max-[720px]:row-gap-2"
-                  >
-                    <span className="grid h-[30px] w-[30px] flex-none place-items-center rounded-lg bg-slate-100 text-slate-600">
-                      <FileText className="h-[15px] w-[15px]" />
-                    </span>
-                    <span className="min-w-0 flex-1 truncate text-[13px] text-slate-700">
-                      {it.file.name}
-                    </span>
-                    <Select
-                      value={it.sourceType}
-                      onChange={(e) =>
-                        updatePending(it.id, { sourceType: e.target.value as SourceTypeFile })
-                      }
-                      className="w-36 flex-none px-2 py-1.5 text-[12px]"
-                      aria-label="内容类型"
-                      disabled={it.uploading}
+                {pending.map((it) => {
+                  const lockBatch = it.uploading || uploadingAny
+                  return (
+                    <li
+                      key={it.id}
+                      className="flex flex-wrap items-center gap-2.5 rounded-[10px] border border-slate-200 bg-white px-3 py-2 max-[720px]:row-gap-2"
                     >
-                      {FILE_SOURCE_TYPES.map((t) => (
-                        <option key={t} value={t}>
-                          {SOURCE_TYPE_META[t].label}
+                      <span className="grid h-[30px] w-[30px] flex-none place-items-center rounded-lg bg-slate-100 text-slate-600">
+                        <FileText className="h-[15px] w-[15px]" />
+                      </span>
+                      <span className="min-w-0 flex-1 truncate text-[13px] text-slate-700">
+                        {it.file.name}
+                      </span>
+                      <Select
+                        value={it.sourceType}
+                        onChange={(e) =>
+                          updatePending(it.id, {
+                            sourceType: e.target.value as SourceTypeFile,
+                          })
+                        }
+                        className="w-36 flex-none px-2 py-1.5 text-[12px]"
+                        aria-label={`内容类型：${it.file.name}`}
+                        disabled={lockBatch}
+                      >
+                        {FILE_SOURCE_TYPES.map((t) => (
+                          <option key={t} value={t}>
+                            {SOURCE_TYPE_META[t].label}
+                          </option>
+                        ))}
+                      </Select>
+                      <Select
+                        value={it.visibility}
+                        onChange={(e) =>
+                          updatePending(it.id, { visibility: e.target.value as Visibility })
+                        }
+                        className="w-[118px] flex-none px-2 py-1.5 text-[12px]"
+                        aria-label={`可见性：${it.file.name}`}
+                        disabled={lockBatch}
+                      >
+                        <option value="private">私有</option>
+                        <option value="school" disabled={!userSchoolId || !attachSchool}>
+                          本校共享
                         </option>
-                      ))}
-                    </Select>
-                    <Select
-                      value={it.visibility}
-                      onChange={(e) =>
-                        updatePending(it.id, { visibility: e.target.value as Visibility })
-                      }
-                      className="w-[118px] flex-none px-2 py-1.5 text-[12px]"
-                      aria-label="可见性"
-                      disabled={it.uploading}
-                    >
-                      <option value="private">私有</option>
-                      <option value="school" disabled={!userSchoolId || !attachSchool}>
-                        本校共享
-                      </option>
-                      <option value="public">公开池</option>
-                    </Select>
-                    <Select
-                      value={it.courseId}
-                      onChange={(e) => updatePending(it.id, { courseId: e.target.value })}
-                      className="w-32 flex-none px-2 py-1.5 text-[12px]"
-                      aria-label="课程标签"
-                      disabled={it.uploading}
-                    >
-                      <option value="">课程：不设置</option>
-                      {courses.map((c) => (
-                        <option key={c.course_id} value={c.course_id}>
-                          {c.name}
-                        </option>
-                      ))}
-                    </Select>
-                    {it.uploading && <Spinner className="h-4 w-4 flex-none" />}
-                    {it.error && (
-                      <span className="flex-none text-xs text-red-600">{it.error}</span>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setPending((prev) => prev.filter((x) => x.id !== it.id))
-                      }
-                      className="grid h-7 w-7 flex-none place-items-center rounded-[7px] text-slate-400 transition-colors hover:bg-red-50 hover:text-red-600"
-                      aria-label="移除"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
-                  </li>
-                ))}
+                        <option value="public">公开池</option>
+                      </Select>
+                      <Select
+                        value={it.courseId}
+                        onChange={(e) => updatePending(it.id, { courseId: e.target.value })}
+                        className="w-32 flex-none px-2 py-1.5 text-[12px]"
+                        aria-label={`课程标签：${it.file.name}`}
+                        disabled={lockBatch}
+                      >
+                        <option value="">课程：不设置</option>
+                        {courses.map((c) => (
+                          <option key={c.course_id} value={c.course_id}>
+                            {c.name}
+                          </option>
+                        ))}
+                      </Select>
+                      {it.uploading && <Spinner className="h-4 w-4 flex-none" />}
+                      {it.error && (
+                        <span className="flex-none text-xs text-red-600">{it.error}</span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setPending((prev) => prev.filter((x) => x.id !== it.id))
+                        }
+                        className="grid h-7 w-7 flex-none place-items-center rounded-[7px] text-slate-400 transition-colors hover:bg-red-50 hover:text-red-600"
+                        aria-label={`移除 ${it.file.name}`}
+                        disabled={lockBatch}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </li>
+                  )
+                })}
               </ul>
               <div className="flex items-center gap-3">
                 <Button
@@ -601,7 +622,13 @@ export function Library() {
         </div>
       )}
 
-      {previewId && <FilePreview uploadId={previewId} onClose={() => setPreviewId(null)} />}
+      {previewId && (
+        <FilePreview
+          key={previewId}
+          uploadId={previewId}
+          onClose={() => setPreviewId(null)}
+        />
+      )}
     </div>
   )
 }

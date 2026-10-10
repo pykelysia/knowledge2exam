@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import {
   AlertCircle,
   BookmarkCheck,
@@ -38,13 +38,17 @@ export function Pool() {
   const [appliedQuery, setAppliedQuery] = useState('')
   const [schoolId, setSchoolId] = useState('')
   const [courseId, setCourseId] = useState('')
-  const [sourceType, setSourceType] = useState('')
+  const [sourceType, setSourceType] = useState<SourceType | ''>('')
 
   const [schools, setSchools] = useState<School[]>([])
   const [courses, setCourses] = useState<Course[]>([])
 
+  // 过期响应守卫：筛选/翻页/轮询并发时，丢弃迟到的旧响应
+  const reqSeq = useRef(0)
+
   const load = useCallback(
     async (targetPage: number) => {
+      const current = ++reqSeq.current
       setLoading(true)
       setError(null)
       try {
@@ -52,18 +56,20 @@ export function Pool() {
           q: appliedQuery || undefined,
           school_id: schoolId || undefined,
           course_id: courseId || undefined,
-          source_type: (sourceType || undefined) as SourceType | undefined,
+          source_type: sourceType || undefined,
           page: targetPage,
           page_size: PAGE_SIZE,
         })
+        if (current !== reqSeq.current) return // 已有更新请求，丢弃过期响应
         setFiles(res.files)
         setTotal(res.total)
         setPage(res.page)
       } catch (err) {
+        if (current !== reqSeq.current) return
         const apiErr = extractApiError(err)
         setError(apiErr ? errorMessage(apiErr.error_code) : '加载失败，请稍后再试')
       } finally {
-        setLoading(false)
+        if (current === reqSeq.current) setLoading(false)
       }
     },
     [appliedQuery, schoolId, courseId, sourceType],
@@ -83,17 +89,17 @@ export function Pool() {
   }, [load])
 
   async function handleSave(file: PoolFile) {
-    const optimistic = (saved: boolean) =>
+    const applySaved = (saved: boolean) =>
       setFiles((prev) =>
         prev.map((f) => (f.upload_id === file.upload_id ? { ...f, is_saved: saved } : f)),
       )
     try {
       if (file.is_saved) {
         await unsavePoolFile(file.upload_id)
-        optimistic(false)
+        applySaved(false)
       } else {
         await savePoolFile(file.upload_id)
-        optimistic(true)
+        applySaved(true)
       }
     } catch (err) {
       const apiErr = extractApiError(err)
@@ -164,7 +170,11 @@ export function Pool() {
             </div>
             <div>
               <Label htmlFor="pool-type">类型</Label>
-              <Select id="pool-type" value={sourceType} onChange={(e) => setSourceType(e.target.value)}>
+              <Select
+                id="pool-type"
+                value={sourceType}
+                onChange={(e) => setSourceType(e.target.value as SourceType | '')}
+              >
                 <option value="">全部类型</option>
                 {FILE_SOURCE_TYPES.map((t) => (
                   <option key={t} value={t}>
@@ -290,7 +300,13 @@ export function Pool() {
         </CardContent>
       </Card>
 
-      {previewId && <FilePreview uploadId={previewId} onClose={() => setPreviewId(null)} />}
+      {previewId && (
+        <FilePreview
+          key={previewId}
+          uploadId={previewId}
+          onClose={() => setPreviewId(null)}
+        />
+      )}
     </div>
   )
 }
