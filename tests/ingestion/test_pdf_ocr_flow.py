@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
-import io
-
 import pytest
 
 from app.config import settings
-from app.ingestion.convert import soffice_available
 from app.ingestion.ocr import VisionLLMOCR
-from app.ingestion.parsers import get_parser
 from app.ingestion.parsers.pdf import PyMuPDFParser
 from app.ingestion.postprocess import replace_page_text, run_page_ocr
-from tests.ingestion.test_parsers import _make_docx, _make_pdf
+from tests.ingestion.test_parsers import _make_pdf
 from tests.ingestion.test_pdf_layout import _make_scan_pdf
 
 
@@ -142,44 +138,3 @@ class TestScannedDocFlow:
         # 占位符进正文，逐图 OCR 后按占位符回填
         assert "[图: p1-1]" in result.text
         assert "[图: p2-2]" in result.text
-
-
-class TestConvertedToPdfParser:
-    async def test_image_wrapped_into_single_page_pdf(self, force_ocr_mode) -> None:
-        from PIL import Image
-
-        buf = io.BytesIO()
-        Image.new("RGB", (600, 800), (250, 250, 250)).save(buf, format="PNG")
-        parser = get_parser("photo.png")
-
-        result = await parser.parse_async("photo.png", buf.getvalue())
-
-        assert result.page_count == 1
-        assert result.page_renders is not None  # 图片无文本层 → 整页走视觉 OCR
-
-    async def test_docx_falls_back_to_native_without_soffice(self, monkeypatch) -> None:
-        import shutil as shutil_module
-
-        from app.ingestion.convert import soffice_available
-
-        monkeypatch.setattr(shutil_module, "which", lambda name: None)
-        assert soffice_available() is False
-
-        parser = get_parser("讲义.docx")
-        result = await parser.parse_async(
-            "讲义.docx", _make_docx(["导数定义", "泰勒展开"], [["考点", "频次"]])
-        )
-
-        # soffice 缺失 → 回落原生 DocxParser，解析照常成功
-        assert "导数定义" in result.text
-        assert result.page_renders is None
-
-    @pytest.mark.skipif(not soffice_available(), reason="LibreOffice 未安装")
-    async def test_docx_converts_to_pdf(self) -> None:
-        parser = get_parser("讲义.docx")
-        result = await parser.parse_async(
-            "讲义.docx", _make_docx(["导数定义"], [["考点", "频次"]])
-        )
-
-        assert result.page_count >= 1
-        assert "导数定义" in result.text  # LibreOffice 产出的 PDF 文本层完好

@@ -1,15 +1,13 @@
 """按格式分流的解析器。
 
-docx/pptx/图片统一先规范化为 PDF（见 convert.py），再走 PDF 混合解析
-（页级体检 + 损坏页视觉 OCR 兜底）；soffice 缺失或转换失败时回落原生
-解析器。md/txt 为干净文本，直接读取。
+各格式走原生解析路径：pdf 混合解析（页级体检 + 损坏页视觉 OCR 兜底）、
+docx→python-docx、pptx→python-pptx、图片→视觉 LLM OCR、md/txt 直读。
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from app.ingestion.convert import ConvertedToPdfParser
 from app.ingestion.parsers.base import (
     SUPPORTED_EXTENSIONS as SUPPORTED_EXTENSIONS,
 )
@@ -28,6 +26,8 @@ from app.ingestion.parsers.text import PlainTextParser
 # 解析器单例映射（避免重复初始化）
 _PARSERS: dict[str, Parser] = {}
 
+_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+
 
 def get_parser(filename: str) -> Parser:
     """根据文件扩展名获取对应解析器。"""
@@ -36,11 +36,11 @@ def get_parser(filename: str) -> Parser:
         if ext == ".pdf":
             _PARSERS[ext] = PyMuPDFParser()
         elif ext == ".docx":
-            _PARSERS[ext] = ConvertedToPdfParser(fallback=DocxParser())
+            _PARSERS[ext] = DocxParser()
         elif ext == ".pptx":
-            _PARSERS[ext] = ConvertedToPdfParser(fallback=PPTXParser())
-        elif ext in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}:
-            _PARSERS[ext] = ConvertedToPdfParser(fallback=ImageParser())
+            _PARSERS[ext] = PPTXParser()
+        elif ext in _IMAGE_EXTENSIONS:
+            _PARSERS[ext] = ImageParser()
         elif ext in {".md", ".txt"}:
             _PARSERS[ext] = PlainTextParser()
         else:

@@ -1,67 +1,98 @@
-"""DOCX 解析器：使用 python-docx 提取文本和内嵌图片。"""
+"""DOCX 解析器：python-docx 原生提取（标题/段落/表格/图片占位符）。
+
+输出统一文本契约：`#` 层级标题 + 正文段落 + 表格 Markdown + `[图: docx-N]`
+占位符（供编排层图片 OCR 原位回填）。DOCX 无页概念，不产出页码。
+"""
 
 from __future__ import annotations
 
 import io
+import re
 
 from app.ingestion.parsers.base import ImageInfo, Parser, ParseResult
+from app.ingestion.parsers.tables import rows_to_markdown
+
+# style_id 区域无关（如 "Heading1"）；样式名随 Word 语言本地化（"标题 1"）
+_HEADING_ID_RE = re.compile(r"^Heading([1-9])$")
+_HEADING_NAME_RE = re.compile(r"^(?:Heading|标题)\s*([1-9])$")
 
 
 class DocxParser(Parser):
-    """DOCX 解析器，提取段落文本和内嵌图片。"""
+    """DOCX 解析器：按文档顺序提取段落、表格与内嵌图片。"""
 
     def parse(self, filename: str, data: bytes) -> ParseResult:
         try:
             from docx import Document
+            from docx.oxml.table import CT_Tbl
+            from docx.oxml.text.paragraph import CT_P
+            from docx.table import Table
+            from docx.text.paragraph import Paragraph
         except ImportError as exc:
             raise RuntimeError("python-docx 未安装，请运行 `pip install python-docx`") from exc
 
         doc = Document(io.BytesIO(data))
 
-        # 提取所有段落文本
-        parts: list[str] = []
-        for para in doc.paragraphs:
-            text = para.text.strip()
-            if text:
-                parts.append(text)
-
-        # 也提取表格内容
-        for table in doc.tables:
-            for row in table.rows:
-                row_text = " | ".join(cell.text.strip() for cell in row.cells if cell.text.strip())
-                if row_text:
-                    parts.append(row_text)
-
-        # 提取内嵌图片（通过 document.part 的关系）
+        blocks: list[str] = []
         images: list[ImageInfo] = []
-        seen_rels: set[str] = set()
-        try:
-            for rel in doc.part.rels.values():
-                if "image" not in rel.reltype:
-                    continue
-                if rel.rId in seen_rels:
-                    continue
-                seen_rels.add(rel.rId)
-                try:
-                    image_part = rel.target_part
-                    image_bytes = image_part.blob
-                    images.append(
-                        ImageInfo(
-                            page=None,
-                            data=image_bytes,
-                            order=len(images),
-                        )
-                    )
-                except Exception:
-                    continue
-        except Exception:
-            pass
+        marker_by_rid: dict[str, str] = {}
 
-        text = "\n\n".join(parts)
+        for child in doc.element.body.iterchildren():
+            if isinstance(child, CT_P):
+                para = Paragraph(child, doc)
+                text = para.text.strip()
+                level = _heading_level(para)
+                if text:
+                    blocks.append(f"{'#' * level} {text}" if level else text)
+                # 段内引用的图片（inline/anchored）就地留占位符；
+                # 同一图片多次引用只建一个 ImageInfo，占位符逐次输出
+                for r_id in child.xpath(".//a:blip/@r:embed"):
+                    marker = marker_by_rid.get(r_id)
+                    if r_id not in marker_by_rid:
+                        marker = self._load_image_marker(doc, r_id, len(images) + 1)
+                        marker_by_rid[r_id] = marker
+                        if marker:
+                            images.append(
+                                ImageInfo(
+                                    data=doc.part.rels[r_id].target_part.blob,
+                                    order=len(images) + 1,
+                                    marker=marker,
+                                )
+                            )
+                    if marker:
+                        blocks.append(marker)
+            elif isinstance(child, CT_Tbl):
+                table = Table(child, doc)
+                markdown = rows_to_markdown(
+                    [[cell.text for cell in row.cells] for row in table.rows]
+                )
+                if markdown:
+                    blocks.append(markdown)
+
+        text = "\n\n".join(blocks)
 
         return ParseResult(
             char_count=len(text),
             page_count=None,
             text=text,
-            images=images if images else None,
+            images=images or None,
         )
+
+    @staticmethod
+    def _load_image_marker(doc, r_id: str, order: int) -> str:
+        """图片关系不可达时返回空串（占位符与图片一并跳过）。"""
+        try:
+            doc.part.rels[r_id].target_part.blob
+        except Exception:  # noqa: BLE001
+            return ""
+        return f"[图: docx-{order}]"
+
+
+def _heading_level(paragraph) -> int | None:
+    """按样式识别标题层级（1-6）；正文返回 None。"""
+    style = paragraph.style
+    match = _HEADING_ID_RE.match(getattr(style, "style_id", "") or "")
+    if match is None:
+        match = _HEADING_NAME_RE.match(getattr(style, "name", "") or "")
+    if match is None:
+        return None
+    return min(int(match.group(1)), 6)

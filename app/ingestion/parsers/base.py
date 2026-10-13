@@ -14,7 +14,7 @@ from pathlib import Path
 
 # 允许的文件扩展名。
 # 注意：必须与 parsers/__init__.py 的 get_parser 映射保持一致，
-# .doc/.ppt 旧格式暂不支持（无 LibreOffice 转换链路），不要加入。
+# .doc/.ppt 旧格式暂不支持（python-docx/python-pptx 仅支持 Open XML），不要加入。
 SUPPORTED_EXTENSIONS = {
     ".docx",
     ".pptx",

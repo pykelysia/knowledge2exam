@@ -5,7 +5,7 @@ from __future__ import annotations
 import io
 
 from app.ingestion.ocr import VisionLLMOCR
-from app.ingestion.parsers.base import ImageInfo, Parser, ParseResult
+from app.ingestion.parsers.base import Parser, ParseResult
 
 
 class ImageParser(Parser):
@@ -26,18 +26,12 @@ class ImageParser(Parser):
         if not ocr_text or not ocr_text.strip():
             ocr_text = f"（图片 {filename}，OCR 未识别出有效文本）"
 
-        image_info = ImageInfo(
-            page=None,
-            data=data,
-            order=0,
-            ocr_text=ocr_text.strip(),
-        )
-
+        # OCR 在解析期已完成，不再返回 images——管线会把 images 的 OCR 文本
+        # 追加到正文，这里若再带上会造成同文重复
         return ParseResult(
             char_count=len(ocr_text.strip()),
             page_count=None,
             text=ocr_text.strip(),
-            images=[image_info],
         )
 
 
