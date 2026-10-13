@@ -48,16 +48,11 @@ class DocxParser(Parser):
                 for r_id in child.xpath(".//a:blip/@r:embed"):
                     marker = marker_by_rid.get(r_id)
                     if r_id not in marker_by_rid:
-                        marker = self._load_image_marker(doc, r_id, len(images) + 1)
+                        image = self._load_image(doc, r_id, len(images) + 1)
+                        marker = image.marker if image is not None else ""
                         marker_by_rid[r_id] = marker
-                        if marker:
-                            images.append(
-                                ImageInfo(
-                                    data=doc.part.rels[r_id].target_part.blob,
-                                    order=len(images) + 1,
-                                    marker=marker,
-                                )
-                            )
+                        if image is not None:
+                            images.append(image)
                     if marker:
                         blocks.append(marker)
             elif isinstance(child, CT_Tbl):
@@ -78,13 +73,13 @@ class DocxParser(Parser):
         )
 
     @staticmethod
-    def _load_image_marker(doc, r_id: str, order: int) -> str:
-        """图片关系不可达时返回空串（占位符与图片一并跳过）。"""
+    def _load_image(doc, r_id: str, order: int) -> ImageInfo | None:
+        """图片关系不可达时返回 None（占位符与图片一并跳过）。"""
         try:
-            doc.part.rels[r_id].target_part.blob
+            blob = doc.part.rels[r_id].target_part.blob
         except Exception:  # noqa: BLE001
-            return ""
-        return f"[图: docx-{order}]"
+            return None
+        return ImageInfo(data=blob, order=order, marker=f"[图: docx-{order}]")
 
 
 def _heading_level(paragraph) -> int | None:

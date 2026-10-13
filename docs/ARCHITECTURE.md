@@ -208,7 +208,7 @@ pending → preprocessing → generating → rendering → completed
 | 验证 | Pydantic ≥ 2.9 + pydantic-settings |
 | Agent | LangChain ≥ 1.4（create_agent + 结构化输出）+ LangGraph ≥ 0.2.60 |
 | LLM | OpenAI 兼容协议（ChatOpenAI，可替换后端） |
-| 文档解析 | PyMuPDF、python-docx、python-pptx、Pillow、LibreOffice（旧格式转换） |
+| 文档解析 | PyMuPDF、python-docx、python-pptx、Pillow（各格式原生直连） |
 | OCR | 视觉 LLM（`OCR_MODEL`，默认 gpt-4o） |
 | PDF 渲染 | Pandoc + XeLaTeX（缺依赖时降级为仅交付 Markdown） |
 | 认证 | httpOnly Cookie + 双 JWT + bcrypt |

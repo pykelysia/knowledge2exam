@@ -45,8 +45,8 @@
 | `app/ingestion/image_enhance.py` | 扫描件图像增强（灰度 → 自动对比度 → 轻锐化，失败回退原图） |
 | `app/ingestion/parsers/pdf.py` | 三路路由与正文组装（`PyMuPDFParser`），纯文本结构化抽取 / 扫描件整页栅格化 / 混合型按阅读顺序区域组装 |
 | `app/ingestion/ocr.py` | 视觉 LLM：整页转录（扫描件/坏页）、图片文字转写（图片区）、图表描述（图表区，独立提示词） |
-| `app/ingestion/postprocess.py` | 图片 OCR 后处理（预筛选/去重/合并）+ `inline_image_text` 占位符就地融合 + `replace_page_text` 整页替换 |
-| `app/ingestion/chunking.py` | `chunk_pdf`：按 `--- Page N ---` 标记把页码写入 `chunk.page`，页界即块界 |
+| `app/ingestion/postprocess.py` | 图片 OCR 后处理（预筛选/去重/合并）+ `inline_image_text` 占位符就地融合 + `replace_page_text` 整页替换 + `strip_page_markers` 回填后剥离页标记 |
+| `app/ingestion/chunking.py` | 统一分块（与格式无关）：`#` 标题栈解析（heading_path）+ 段落贪心合并 + 超长段落递归切分（句界→硬切）+ 统一尾部重叠；`embedding_text = heading_path + "\n" + text` |
 | `app/orchestration/stages.py` | 编排接线：OCR 替换 → 图片融合（占位符回填，无占位符回退文末追加）→ chunk → embedding → pgvector |
 
 ### 类型判定规则
