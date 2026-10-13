@@ -1,102 +1,161 @@
-"""chunking 模块单元测试。"""
+"""chunking 模块单元测试：统一分块策略（结构优先、大小兜底）。"""
 
 from __future__ import annotations
 
-import pytest
-
-from app.core.enums import SourceType
 from app.ingestion.chunking import Chunker
 
 
-@pytest.fixture
-def chunker() -> Chunker:
-    return Chunker(chunk_size=10, overlap=2)
+class TestStructure:
+    def test_heading_path_per_section(self) -> None:
+        chunker = Chunker(chunk_size=3, overlap=0)
+        text = "# 第二章\n\n第一段\n\n## 2.3 碰撞\n\n第二段"
 
+        chunks = chunker.chunk(text)
 
-class TestChunkBySize:
-    def test_short_text(self, chunker: Chunker) -> None:
-        chunks = chunker.chunk("hello", source_type=SourceType.note)
+        assert [c.text for c in chunks] == ["第一段", "第二段"]
+        assert chunks[0].heading_path == "第二章"
+        assert chunks[1].heading_path == "第二章 > 2.3 碰撞"
+
+    def test_heading_lines_excluded_from_body(self) -> None:
+        chunker = Chunker(chunk_size=100, overlap=0)
+        chunks = chunker.chunk("# 标题\n\n正文内容")
         assert len(chunks) == 1
-        assert chunks[0].text == "hello"
-        assert chunks[0].chunk_index == 0
+        assert chunks[0].text == "正文内容"
+        assert "#" not in chunks[0].text
 
-    def test_exact_size(self, chunker: Chunker) -> None:
-        text = "a" * 10
-        chunks = chunker.chunk(text, source_type=SourceType.note)
+    def test_heading_stack_pops_on_higher_level(self) -> None:
+        chunker = Chunker(chunk_size=3, overlap=0)
+        text = "# A\n\n## B\n\np1\n\n# C\n\np2"
+
+        chunks = chunker.chunk(text)
+
+        assert chunks[0].heading_path == "A > B"
+        assert chunks[1].heading_path == "C"
+
+    def test_plain_text_has_no_heading(self) -> None:
+        chunker = Chunker(chunk_size=100, overlap=0)
+        chunks = chunker.chunk("没有结构的普通文本。")
+        assert chunks[0].heading_path is None
+        assert chunks[0].embedding_text == chunks[0].text
+
+    def test_empty_and_heading_only_documents_yield_no_chunks(self) -> None:
+        chunker = Chunker(chunk_size=100, overlap=10)
+        assert chunker.chunk("") == []
+        assert chunker.chunk("\n\n  \n") == []
+        assert chunker.chunk("# 只有标题\n\n## 没有正文") == []
+
+
+class TestMergeAndOverlap:
+    def test_short_document_single_chunk(self) -> None:
+        chunker = Chunker(chunk_size=50, overlap=5)
+        chunks = chunker.chunk("第一段\n\n第二段")
         assert len(chunks) == 1
-        assert chunks[0].text == text
+        assert chunks[0].text == "第一段\n\n第二段"
 
-    def test_split(self, chunker: Chunker) -> None:
-        text = "a" * 25
-        chunks = chunker.chunk(text, source_type=SourceType.note)
+    def test_paragraphs_merge_within_budget(self) -> None:
+        chunker = Chunker(chunk_size=30, overlap=0)
+        chunks = chunker.chunk("a" * 10 + "\n\n" + "b" * 10)
+        assert len(chunks) == 1
+        assert chunks[0].text == "a" * 10 + "\n\n" + "b" * 10
+
+    def test_uniform_tail_overlap_prefixes_next_chunk(self) -> None:
+        chunker = Chunker(chunk_size=20, overlap=5)
+        chunks = chunker.chunk("a" * 15 + "\n\n" + "b" * 15)
+
+        assert len(chunks) == 2
+        assert chunks[0].text == "a" * 15
+        # 上块末段尾部 5 字符作为下块前缀（统一尾部重叠）
+        assert chunks[1].text == "a" * 5 + "\n\n" + "b" * 15
+
+    def test_zero_overlap_disables_prefix(self) -> None:
+        chunker = Chunker(chunk_size=20, overlap=0)
+        chunks = chunker.chunk("a" * 15 + "\n\n" + "b" * 15)
+        assert chunks[1].text == "b" * 15
+
+    def test_all_chunks_within_body_budget(self) -> None:
+        chunker = Chunker(chunk_size=20, overlap=5)
+        text = "\n\n".join("段" * 12 + str(i) for i in range(10))
+        chunks = chunker.chunk(text)
         assert len(chunks) > 1
-        for c in chunks:
-            assert len(c.text) <= chunker.chunk_size
+        # 预算只约束正文：块长上限 = 正文预算 + 重叠前缀
+        for chunk in chunks:
+            assert len(chunk.text) <= chunker.overlap + chunker.chunk_size
 
 
-class TestChunkByPage:
-    def test_short_page(self, chunker: Chunker) -> None:
-        chunks = chunker.chunk("hello", page=1, source_type=SourceType.lecture)
-        assert len(chunks) == 1
-        assert chunks[0].page == 1
+class TestRecursiveSplit:
+    def test_oversized_paragraph_splits_at_sentence_boundaries(self) -> None:
+        chunker = Chunker(chunk_size=30, overlap=0)
+        sentence = "0123456789。"
+        text = sentence * 5  # 单段 55 字符，超限
 
-    def test_long_page(self, chunker: Chunker) -> None:
-        text = "a" * 25
-        chunks = chunker.chunk(text, page=3, source_type=SourceType.lecture)
-        assert all(c.page == 3 for c in chunks)
-        assert len(chunks) > 1
+        chunks = chunker.chunk(text)
+
+        assert [c.text for c in chunks] == [sentence * 2, sentence * 2, sentence]
+        assert all(len(c.text) <= chunker.chunk_size for c in chunks)
+
+    def test_oversized_paragraph_without_punctuation_hard_cuts(self) -> None:
+        chunker = Chunker(chunk_size=20, overlap=0)
+        text = "x" * 50
+
+        chunks = chunker.chunk(text)
+
+        assert [len(c.text) for c in chunks] == [20, 20, 10]
+        # 无重叠时片段与原文区间一一对应
+        assert all(text[c.char_start : c.char_end] == c.text for c in chunks)
+
+    def test_split_offsets_are_contiguous(self) -> None:
+        chunker = Chunker(chunk_size=30, overlap=0)
+        text = "0123456789。" * 5
+
+        chunks = chunker.chunk(text)
+
+        assert [(c.char_start, c.char_end) for c in chunks] == [(0, 22), (22, 44), (44, 55)]
 
 
-class TestChunkByParagraph:
-    def test_paragraph_merge(self, chunker: Chunker) -> None:
-        text = "a\n\nb\n\nc"
-        chunks = chunker.chunk(text, source_type=SourceType.book)
-        assert len(chunks) >= 1
-        for c in chunks:
-            assert len(c.text) <= chunker.chunk_size
+class TestCharOffsets:
+    def test_offsets_skip_separators_and_do_not_regress(self) -> None:
+        chunker = Chunker(chunk_size=20, overlap=0)
+        text = "a" * 15 + "\n\n" + "b" * 15
+
+        chunks = chunker.chunk(text)
+
+        assert chunks[0].char_start == 0
+        assert chunks[0].char_end == 15
+        # 区间按 chunk_index 单调不回退（空白分隔符不属任何块）
+        assert chunks[1].char_start == text.index("b" * 15)
+        assert chunks[1].char_start >= chunks[0].char_end
+
+    def test_heading_offset_attributed_to_following_chunk(self) -> None:
+        chunker = Chunker(chunk_size=3, overlap=0)
+        text = "P0\n\n# T\n\nP1"
+
+        chunks = chunker.chunk(text)
+
+        assert [c.text for c in chunks] == ["P0", "P1"]
+        # 标题行偏移归属其后首个 chunk：区间覆盖"标题 + 正文"
+        assert chunks[1].char_start == text.index("# T")
+        assert text[chunks[1].char_start : chunks[1].char_end] == "# T\n\nP1"
 
 
-class TestChunkMetadata:
-    def test_metadata_propagation(self, chunker: Chunker) -> None:
-        chunks = chunker.chunk("hello world", source_type=SourceType.note)
-        assert chunks[0].source_type == SourceType.note
-        assert chunks[0].chunk_index == 0
+class TestEmbeddingText:
+    def test_embedding_text_prefixes_heading_path(self) -> None:
+        chunker = Chunker(chunk_size=100, overlap=0)
+        chunks = chunker.chunk("# 第二章\n\n正文")
+        assert chunks[0].embedding_text == "第二章\n正文"
+
+    def test_embedding_text_joins_nested_headings(self) -> None:
+        chunker = Chunker(chunk_size=3, overlap=0)
+        chunks = chunker.chunk("# A\n\n## B\n\np")
+        assert chunks[0].embedding_text == "A > B\np"
+
+    def test_embedding_text_falls_back_to_text(self) -> None:
+        chunker = Chunker(chunk_size=100, overlap=0)
+        chunks = chunker.chunk("无标题正文")
+        assert chunks[0].embedding_text == chunks[0].text
 
 
-class TestChunkPdf:
-    def test_page_metadata_propagates(self) -> None:
-        chunker = Chunker(chunk_size=15, overlap=0)
-        text = "--- Page 1 ---\n\npara one\n\npara two\n\n--- Page 2 ---\n\npara three"
-        chunks = chunker.chunk_pdf(text, source_type=SourceType.book)
-
+class TestChunkIndex:
+    def test_chunk_index_globally_consecutive(self) -> None:
+        chunker = Chunker(chunk_size=20, overlap=5)
+        chunks = chunker.chunk("\n\n".join("段落内容" * 6 + str(i) for i in range(8)))
         assert [c.chunk_index for c in chunks] == list(range(len(chunks)))
-        # 页界即块界：chunk.page 与内容所在页严格对应
-        assert [c.page for c in chunks] == [1, 1, 2]
-        assert chunks[0].text == "para one"
-        assert chunks[-1].text == "para three"
-
-    def test_chunks_never_span_pages(self) -> None:
-        chunker = Chunker(chunk_size=1000, overlap=0)
-        text = "--- Page 3 ---\n\nalpha\n\nbeta\n\n--- Page 4 ---\n\ngamma"
-        chunks = chunker.chunk_pdf(text, source_type=SourceType.book)
-
-        assert [(c.page, c.text) for c in chunks] == [
-            (3, "alpha\n\nbeta"),
-            (4, "gamma"),
-        ]
-
-    def test_no_markers_falls_back(self) -> None:
-        chunker = Chunker(chunk_size=1000, overlap=0)
-        chunks = chunker.chunk_pdf("plain text", source_type=SourceType.book)
-        assert len(chunks) == 1
-        assert chunks[0].page is None
-        assert chunks[0].text == "plain text"
-
-    def test_prefix_before_first_marker_kept(self) -> None:
-        chunker = Chunker(chunk_size=1000, overlap=0)
-        text = "front matter\n\n--- Page 1 ---\n\nbody"
-        chunks = chunker.chunk_pdf(text, source_type=SourceType.book)
-        assert [(c.page, c.text) for c in chunks] == [
-            (None, "front matter"),
-            (1, "body"),
-        ]

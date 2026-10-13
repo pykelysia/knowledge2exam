@@ -37,6 +37,7 @@ from app.ingestion.postprocess import (
     process_images,
     replace_page_text,
     run_page_ocr,
+    strip_page_markers,
 )
 from app.models.upload import Upload
 from app.retrieval.vector_store import PgVectorStore
@@ -105,7 +106,7 @@ async def _parse_file(upload: Upload, warnings: list[dict]) -> tuple[str, int]:
     if result.images:
         # 图片后处理（OCR 在工作线程内执行）：去重、合并、间隙标记
         await asyncio.to_thread(process_images, result.images)
-        # 占位符就地融合（PDF 图片/图表引用回填原文位置）；
+        # 占位符就地融合（图片/图表引用回填原文位置）；
         # 无占位符的解析产物（旧格式/其他解析器）回退文末追加
         inlined = await asyncio.to_thread(inline_image_text, result.text, result.images)
         if inlined is not None:
@@ -114,9 +115,11 @@ async def _parse_file(upload: Upload, warnings: list[dict]) -> tuple[str, int]:
             image_text = await asyncio.to_thread(build_merged_text, result.images)
             if image_text:
                 result.text = result.text + "\n\n" + image_text
-        result.char_count = len(result.text)
 
-    return result.text, result.char_count
+    # 页标记仅为页级 OCR 回填的内部传输格式，落盘/切块前剥离，
+    # 保证落盘产物与 chunk 的 char 偏移严格对齐
+    text = strip_page_markers(result.text)
+    return text, len(text)
 
 
 async def _apply_page_ocr(
@@ -184,12 +187,11 @@ async def _persist_artifacts(
             overlap=settings.chunk_overlap,
         )
         # CPU 密集：下放线程池执行，避免阻塞事件循环（大文本切块可达秒级）
-        chunks = await asyncio.to_thread(
-            chunker.chunk_pdf, text, source_type=upload.source_type
-        )
+        chunks = await asyncio.to_thread(chunker.chunk, text)
         if chunks:
             embedder = EmbeddingClient.from_settings()
-            embeddings = await embedder.embed([c.text for c in chunks])
+            # 仅 embedding_text 进嵌入模型（含标题路径前缀）
+            embeddings = await embedder.embed([c.embedding_text for c in chunks])
             _bind_chunk_metadata(chunks, embeddings, upload=upload)
             # 复用 db 事务：chunk 写入失败时与解析产物登记一起回滚
             await PgVectorStore(AsyncSessionLocal).upsert(chunks, session=db)

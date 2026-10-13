@@ -87,7 +87,6 @@ class PgVectorStore(VectorStore):
             stmt = insert(ChunkModel).values(
                 upload_id=chunk.upload_id,
                 source_type=chunk.source_type or SourceType.note,
-                page=chunk.page,
                 chunk_index=chunk.chunk_index,
                 text=chunk.text,
                 embedding=chunk.embedding,

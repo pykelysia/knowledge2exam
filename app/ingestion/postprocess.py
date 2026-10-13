@@ -11,7 +11,7 @@
 - replace_page_text(text) — 按 `--- Page N ---` 标记把转录结果替换回文档
 
 公共接口：process_images(images) / inline_image_text(text, images) /
-run_page_ocr(renders) / replace_page_text(...)
+run_page_ocr(renders) / replace_page_text(...) / strip_page_markers(...)
 """
 
 from __future__ import annotations
@@ -396,6 +396,19 @@ def replace_page_text(doc_text: str, page_texts: dict[int, str]) -> str:
         else:
             parts.append(doc_text[match.end() : body_end])
     return "".join(parts)
+
+
+def strip_page_markers(text: str) -> str:
+    """剥离 `--- Page N ---` 页标记行（页级 OCR 回填完成后的收尾步骤）。
+
+    页标记是 PDF 页级 OCR 回填的内部传输格式，不应进入落盘产物、
+    分块与嵌入向量。无标记时原样返回。
+    """
+    stripped = _PAGE_MARKER_RE.sub("", text)
+    if stripped == text:
+        return text
+    # 标记行移除后压缩连续空行、清理首尾
+    return re.sub(r"\n{3,}", "\n\n", stripped).strip("\n")
 
 
 async def run_page_ocr(
