@@ -265,8 +265,8 @@ def _search_knowledge_tool(ctx: AgentContext) -> StructuredTool:
         blocks = []
         for i, c in enumerate(result.chunks, start=1):
             source = c.get("source_type", "unknown")
-            page = c.get("page")
-            loc = f"{source} 第 {page} 页" if page else source
+            heading = c.get("heading_path")
+            loc = f"{source} · {heading}" if heading else source
             blocks.append(f"[{i}] 来源：{loc}（相似度 {c.get('similarity', 0):.2f}）\n{c['text']}")
         return "\n\n---\n\n".join(blocks)
 

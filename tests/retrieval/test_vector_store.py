@@ -62,6 +62,26 @@ class TestUpsertEmbedding:
         params = session.statements[0].compile().params
         assert params["embedding"] == [0.1, 0.2, 0.3]
 
+    async def test_upsert_writes_heading_metadata(self) -> None:
+        """upsert 携带统一分块的元数据列（heading_path/偏移/embedding_text）。"""
+        session = _RecordingSession()
+        store = PgVectorStore(lambda: session)
+        chunk = _make_chunk(
+            heading_path="第二章 > 2.3 碰撞",
+            char_start=12,
+            char_end=340,
+            embedding_text="第二章 > 2.3 碰撞\n正文……",
+            embedding=[0.1],
+        )
+
+        await store.upsert([chunk])
+
+        params = session.statements[0].compile().params
+        assert params["heading_path"] == "第二章 > 2.3 碰撞"
+        assert params["char_start"] == 12
+        assert params["char_end"] == 340
+        assert params["embedding_text"] == "第二章 > 2.3 碰撞\n正文……"
+
     async def test_upsert_each_chunk_keeps_own_embedding(self) -> None:
         """逐条 INSERT 时各 chunk 携带各自的向量。"""
         session = _RecordingSession()
@@ -100,7 +120,7 @@ class TestBuildFilter:
                 ]},
                 {"and": [
                     {"eq": {"source_type": "note"}},
-                    {"eq": {"page": 3}},
+                    {"eq": {"chunk_index": 3}},
                 ]},
             ],
         }
@@ -118,7 +138,7 @@ class TestBuildFilter:
         sql = str(or_group.compile())
         assert "upload_id IN" in sql
         assert "source_type" in sql
-        assert "page" in sql
+        assert "chunk_index" in sql
 
     def test_flat_filters_still_supported(self) -> None:
         """扁平 eq/in 过滤行为不变。"""
@@ -156,12 +176,12 @@ class TestBuildFilter:
         assert len(conditions) == 1
 
     def test_combined_and_semantics(self) -> None:
-        """and 与 or 嵌套组合：and_(or_base, page) 双重条件结构成立。"""
+        """and 与 or 嵌套组合：and_(or_base, chunk_index) 双重条件结构成立。"""
         expr: dict[str, Any] = {
             "and": [
                 {"or": [
                     {"in": {"upload_id": ["u1", "u2"]}},
-                    {"eq": {"page": 5}},
+                    {"eq": {"chunk_index": 5}},
                 ]},
                 {"or": [{"eq": {"source_type": "book"}}]},
             ],

@@ -185,7 +185,12 @@ class TestSearchKnowledge:
     async def test_returns_formatted_chunks(self, tmp_path: Path, recorder: Recorder) -> None:
         store = StubStore(
             chunks=[
-                {"text": "导数定义……", "source_type": "book", "page": 3, "similarity": 0.91},
+                {
+                    "text": "导数定义……",
+                    "source_type": "book",
+                    "heading_path": "第二章 > 导数",
+                    "similarity": 0.91,
+                },
                 {"text": "极限性质……", "source_type": "note", "similarity": 0.8},
             ]
         )
@@ -199,7 +204,7 @@ class TestSearchKnowledge:
         result = await search.coroutine(query="导数", top_k=1)
         assert "导数定义" in result
         assert "极限性质" not in result  # top_k 生效
-        assert "第 3 页" in result
+        assert "book · 第二章 > 导数" in result
 
     async def test_empty_result_hint(self, tmp_path: Path) -> None:
         ctx = make_ctx(tmp_path, upload_ids=[uuid4()])

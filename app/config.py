@@ -95,9 +95,9 @@ class Settings(BaseSettings):
     # 部分 OpenAI 兼容后端不支持 dimensions 参数，不支持时置为 false
     embedding_send_dimensions: bool = True
 
-    # 切块参数
+    # 切块参数（chunk_size 预算只约束正文；overlap 为字符制尾部重叠，≈20-50 token）
     chunk_size: int = 700
-    chunk_overlap: int = 100
+    chunk_overlap: int = 50
 
     # 用户文本输入长度限制（字符数）
     # - max_extra_requirement_chars：额外要求文本上传超限即拒绝

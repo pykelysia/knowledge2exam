@@ -89,6 +89,10 @@ class PgVectorStore(VectorStore):
                 source_type=chunk.source_type or SourceType.note,
                 chunk_index=chunk.chunk_index,
                 text=chunk.text,
+                heading_path=chunk.heading_path,
+                char_start=chunk.char_start,
+                char_end=chunk.char_end,
+                embedding_text=chunk.embedding_text,
                 embedding=chunk.embedding,
             )
             stmt = stmt.on_conflict_do_nothing(index_elements=["upload_id", "chunk_index"])
@@ -125,7 +129,9 @@ class PgVectorStore(VectorStore):
                     ChunkModel.text,
                     ChunkModel.upload_id,
                     ChunkModel.source_type,
-                    ChunkModel.page,
+                    ChunkModel.heading_path,
+                    ChunkModel.char_start,
+                    ChunkModel.char_end,
                     ChunkModel.chunk_index,
                     similarity_col,
                 )
@@ -147,7 +153,9 @@ class PgVectorStore(VectorStore):
                 "text": row.text,
                 "upload_id": str(row.upload_id),
                 "source_type": source_type_val,
-                "page": row.page,
+                "heading_path": row.heading_path,
+                "char_start": row.char_start,
+                "char_end": row.char_end,
                 "chunk_index": row.chunk_index,
                 "similarity": float(row.similarity),
             })

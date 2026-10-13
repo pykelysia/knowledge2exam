@@ -53,9 +53,15 @@ class Chunk(Base, TimestampMixin):
     source_type: Mapped[SourceType] = mapped_column(
         Enum(SourceType, name="source_type"), nullable=False
     )
-    page: Mapped[int | None] = mapped_column(Integer, nullable=True)
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
+    # 标题路径（如 "第2章 > 2.3 节"），检索引用用元数据，不参与嵌入
+    heading_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 自有正文在解析产物中的字符区间（不含重叠前缀），[start, end)
+    char_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    char_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 进入嵌入模型的文本（heading_path + "\n" + text）；存量为 NULL
+    embedding_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     embedding: Mapped[list[float]] = mapped_column(
         Vector(settings.embedding_dimensions), nullable=False
     )
