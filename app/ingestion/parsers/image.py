@@ -23,16 +23,13 @@ class ImageParser(Parser):
         except Exception as exc:
             raise RuntimeError(f"图片 OCR 失败: {exc}") from exc
 
-        if not ocr_text or not ocr_text.strip():
+        ocr_text = (ocr_text or "").strip()
+        if not ocr_text:
             ocr_text = f"（图片 {filename}，OCR 未识别出有效文本）"
 
         # OCR 在解析期已完成，不再返回 images——管线会把 images 的 OCR 文本
         # 追加到正文，这里若再带上会造成同文重复
-        return ParseResult(
-            char_count=len(ocr_text.strip()),
-            page_count=None,
-            text=ocr_text.strip(),
-        )
+        return ParseResult(char_count=len(ocr_text), page_count=None, text=ocr_text)
 
 
 def _preprocess_image(data: bytes, max_size: int = 1024) -> bytes:

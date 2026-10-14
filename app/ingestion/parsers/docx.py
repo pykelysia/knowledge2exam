@@ -46,13 +46,7 @@ class DocxParser(Parser):
                 # 段内引用的图片（inline/anchored）就地留占位符；
                 # 同一图片多次引用只建一个 ImageInfo，占位符逐次输出
                 for r_id in child.xpath(".//a:blip/@r:embed"):
-                    marker = marker_by_rid.get(r_id)
-                    if r_id not in marker_by_rid:
-                        image = self._load_image(doc, r_id, len(images) + 1)
-                        marker = image.marker if image is not None else ""
-                        marker_by_rid[r_id] = marker
-                        if image is not None:
-                            images.append(image)
+                    marker = self._add_image_block(doc, r_id, images, marker_by_rid)
                     if marker:
                         blocks.append(marker)
             elif isinstance(child, CT_Tbl):
@@ -62,6 +56,11 @@ class DocxParser(Parser):
                 )
                 if markdown:
                     blocks.append(markdown)
+                # 单元格内的插图一并提取：cell.text 不承载图片，静默丢弃即内容损失
+                for r_id in child.xpath(".//a:blip/@r:embed"):
+                    marker = self._add_image_block(doc, r_id, images, marker_by_rid)
+                    if marker:
+                        blocks.append(marker)
 
         text = "\n\n".join(blocks)
 
@@ -73,13 +72,24 @@ class DocxParser(Parser):
         )
 
     @staticmethod
-    def _load_image(doc, r_id: str, order: int) -> ImageInfo | None:
-        """图片关系不可达时返回 None（占位符与图片一并跳过）。"""
+    def _add_image_block(
+        doc, r_id: str, images: list[ImageInfo], marker_by_rid: dict[str, str]
+    ) -> str:
+        """登记图片并返回占位符；同一图片重复引用复用首个占位符。
+
+        图片关系不可达时返回空串（占位符与图片一并跳过）。
+        """
+        if r_id in marker_by_rid:
+            return marker_by_rid[r_id]
         try:
             blob = doc.part.rels[r_id].target_part.blob
         except Exception:  # noqa: BLE001
-            return None
-        return ImageInfo(data=blob, order=order, marker=f"[图: docx-{order}]")
+            marker_by_rid[r_id] = ""
+            return ""
+        marker = f"[图: docx-{len(images) + 1}]"
+        marker_by_rid[r_id] = marker
+        images.append(ImageInfo(data=blob, order=len(images) + 1, marker=marker))
+        return marker
 
 
 def _heading_level(paragraph) -> int | None:

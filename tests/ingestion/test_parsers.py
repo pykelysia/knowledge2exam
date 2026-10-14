@@ -147,6 +147,23 @@ class TestDocxParser:
         assert result.images[0].marker == "[图: docx-1]"
         assert result.images[0].data == png
 
+    async def test_image_inside_table_cell_extracted(self) -> None:
+        """单元格内的插图不随 cell.text 静默丢失。"""
+        from docx import Document
+
+        doc = Document()
+        table = doc.add_table(rows=1, cols=2)
+        table.rows[0].cells[0].text = "带图单元格"
+        table.rows[0].cells[1].paragraphs[0].add_run().add_picture(io.BytesIO(_png_bytes()))
+        buf = io.BytesIO()
+        doc.save(buf)
+
+        result = await DocxParser().parse_async("讲义.docx", buf.getvalue())
+
+        assert "[图: docx-1]" in result.text
+        assert result.images is not None
+        assert "| 带图单元格 |  |" in result.text
+
 
 class TestPPTXParser:
     async def test_parse_slides_title_body_notes(self) -> None:
@@ -197,6 +214,17 @@ class TestPPTXParser:
         # 跨页同字节图片（logo/水印）整体跳过
         assert result.images is None
         assert "[图:" not in result.text
+
+    async def test_same_picture_twice_on_one_slide_kept(self) -> None:
+        """同页重复出现不构成跨页 logo，两张都保留。"""
+        pic = _png_bytes()
+        data = _make_pptx([{"title": "对比图", "pictures": [pic, pic]}])
+
+        result = await PPTXParser().parse_async("课件.pptx", data)
+
+        assert result.images is not None
+        assert len(result.images) == 2
+        assert result.text.count("[图: slide1-") == 2
 
     async def test_full_slide_picture_treated_as_background(self) -> None:
         data = _make_pptx([

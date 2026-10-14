@@ -14,6 +14,7 @@ from app.ingestion.postprocess import (
     build_merged_text,
     inline_image_text,
     process_images,
+    strip_page_markers,
 )
 
 # ---------- 工具函数 ----------
@@ -21,6 +22,23 @@ from app.ingestion.postprocess import (
 def _make_image(order: int, ocr_text: str | None = None, data: bytes | None = None) -> ImageInfo:
     """构造测试用 ImageInfo。"""
     return ImageInfo(page=1, data=data or b"fake", order=order, ocr_text=ocr_text)
+
+
+# ---------- strip_page_markers ----------
+
+
+class TestStripPageMarkers:
+    def test_no_markers_returned_unchanged(self) -> None:
+        text = "普通文本\n\n第二段"
+        assert strip_page_markers(text) is text
+
+    def test_leading_middle_trailing_markers_stripped(self) -> None:
+        text = "--- Page 1 ---\n\n正文一\n\n--- Page 2 ---\n\n正文二"
+        assert strip_page_markers(text) == "正文一\n\n正文二"
+
+    def test_consecutive_markers_leave_no_blank_runs(self) -> None:
+        text = "前言\n\n--- Page 1 ---\n\n\n--- Page 2 ---\n正文"
+        assert strip_page_markers(text) == "前言\n\n正文"
 
 
 # ---------- _jaccard_similarity ----------

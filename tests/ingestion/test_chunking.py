@@ -2,7 +2,21 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.ingestion.chunking import Chunker
+
+
+class TestParameterValidation:
+    def test_non_positive_chunk_size_rejected(self) -> None:
+        with pytest.raises(ValueError, match="chunk_size"):
+            Chunker(chunk_size=0)
+        with pytest.raises(ValueError, match="chunk_size"):
+            Chunker(chunk_size=-1)
+
+    def test_negative_overlap_rejected(self) -> None:
+        with pytest.raises(ValueError, match="overlap"):
+            Chunker(chunk_size=10, overlap=-1)
 
 
 class TestStructure:
@@ -22,6 +36,12 @@ class TestStructure:
         assert len(chunks) == 1
         assert chunks[0].text == "正文内容"
         assert "#" not in chunks[0].text
+
+    def test_heading_change_forces_new_chunk(self) -> None:
+        """chunk 不跨小节：即使预算足够，小节边界也强制出块。"""
+        chunker = Chunker(chunk_size=100, overlap=0)
+        chunks = chunker.chunk("# A\n\npa\n\n# B\n\npb")
+        assert [(c.text, c.heading_path) for c in chunks] == [("pa", "A"), ("pb", "B")]
 
     def test_heading_stack_pops_on_higher_level(self) -> None:
         chunker = Chunker(chunk_size=3, overlap=0)

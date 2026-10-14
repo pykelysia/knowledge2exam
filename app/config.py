@@ -9,7 +9,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # jwt_secret 的内置开发默认值；生产环境（DEBUG_MODE=false）启动时校验必须覆盖
@@ -96,8 +96,9 @@ class Settings(BaseSettings):
     embedding_send_dimensions: bool = True
 
     # 切块参数（chunk_size 预算只约束正文；overlap 为字符制尾部重叠，≈20-50 token）
-    chunk_size: int = 700
-    chunk_overlap: int = 50
+    # chunk_size ≤ 0 会让切点循环死循环，配置层即拒
+    chunk_size: int = Field(default=700, gt=0)
+    chunk_overlap: int = Field(default=50, ge=0)
 
     # 用户文本输入长度限制（字符数）
     # - max_extra_requirement_chars：额外要求文本上传超限即拒绝

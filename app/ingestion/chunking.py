@@ -4,7 +4,8 @@
 （含表格 Markdown、图片 OCR 回填文本）。算法：
 
 1. 结构分析：`#` 标题行维护层级栈（heading_path），标题不进正文；
-2. 段落贪心合并至 chunk_size（预算只约束正文）；
+2. 段落贪心合并至 chunk_size（预算只约束正文；标题路径变更即出块，
+   chunk 不跨小节）；
 3. 超长段落递归切分：句末标点切句（L2）→ 无标点则硬字符截断（L3）；
 4. 所有出块边界统一尾部重叠 overlap 字符（取上块末段尾部）；
 5. char_start/char_end 指向该块自有正文（不含重叠前缀）在输入文本中
@@ -112,6 +113,12 @@ class Chunker:
     """统一文本切块器：结构优先、大小兜底。"""
 
     def __init__(self, chunk_size: int = 700, overlap: int = 50) -> None:
+        # 非法参数会让 _split_oversized 的切点循环死循环（cut 不前进），
+        # 构造期即拒；settings 层另有 gt/ge 约束兜底
+        if chunk_size <= 0:
+            raise ValueError(f"chunk_size must be positive, got {chunk_size}")
+        if overlap < 0:
+            raise ValueError(f"overlap must be non-negative, got {overlap}")
         self.chunk_size = chunk_size
         self.overlap = overlap
 
@@ -130,12 +137,19 @@ class Chunker:
         current_len = 0
         overlap_prefix = ""
         for piece in pieces:
-            if current and current_len + len(piece.text) > self.chunk_size:
+            if current and (
+                # 标题路径变更即出块：chunk 不跨小节。否则跨界段落会被
+                # 错误的小节标题引用/嵌入，小节标题也只存在于元数据而无处检索
+                piece.heading_path != current[-1].heading_path
+                or current_len + len(piece.text) > self.chunk_size
+            ):
                 chunks.append(self._emit(current, overlap_prefix))
                 tail = current[-1].text
                 overlap_prefix = tail[-self.overlap :] if self.overlap > 0 else ""
                 current, current_len = [], 0
             current.append(piece)
+            # current_len 不含块内 "\n\n" 分隔符：实际正文可小幅超出预算，
+            # 测试按 overlap + chunk_size 封顶锁定该上限
             current_len += len(piece.text)
         if current:
             chunks.append(self._emit(current, overlap_prefix))
@@ -185,6 +199,8 @@ class Chunker:
 
     @staticmethod
     def _make_piece(unit: _Unit, start: int, end: int, *, is_first: bool) -> _Unit:
+        # 精度说明：unit.text 由各行 strip 后重拼，段落行边有空白时片段
+        # 偏移按拼接文本线性映射，与原文可能有少量漂移（仅影响元数据精度）
         raw = unit.text[start:end]
         lead = len(raw) - len(raw.lstrip())
         trail = len(raw) - len(raw.rstrip())

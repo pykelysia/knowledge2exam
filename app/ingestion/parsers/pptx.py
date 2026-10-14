@@ -14,7 +14,7 @@ import io
 from app.ingestion.parsers.base import ImageInfo, Parser, ParseResult
 from app.ingestion.parsers.tables import rows_to_markdown
 
-# 同字节图片跨页出现次数达到该值视为 logo/水印
+# 同字节图片出现的页数达到该值视为 logo/水印（同页多次重复不计数）
 _LOGO_REPEAT_THRESHOLD = 2
 # 图片宽高均达到幻灯片尺寸的该比例视为背景图
 _BACKGROUND_COVERAGE = 0.95
@@ -32,9 +32,10 @@ class PPTXParser(Parser):
         prs = Presentation(io.BytesIO(data))
         slides = list(prs.slides)
 
-        # 第一遍：统计图片字节指纹，识别跨页重复的 logo/水印
-        blob_counts: dict[str, int] = {}
-        for slide in slides:
+        # 第一遍：按字节指纹统计出现的页码集合，识别跨页重复的 logo/水印；
+        # 同页多次出现不重复计数，避免误杀单页内重复引用的内容图
+        digest_pages: dict[str, set[int]] = {}
+        for slide_num, slide in enumerate(slides, start=1):
             for shape in _iter_shapes(slide.shapes):
                 if _is_picture(shape):
                     try:
@@ -42,12 +43,12 @@ class PPTXParser(Parser):
                     except Exception:  # noqa: BLE001
                         continue
                     digest = hashlib.sha256(blob).hexdigest()
-                    blob_counts[digest] = blob_counts.get(digest, 0) + 1
+                    digest_pages.setdefault(digest, set()).add(slide_num)
 
         blocks: list[str] = []
         images: list[ImageInfo] = []
         for slide_num, slide in enumerate(slides, start=1):
-            blocks.extend(self._parse_slide(slide, slide_num, prs, blob_counts, images))
+            blocks.extend(self._parse_slide(slide, slide_num, prs, digest_pages, images))
 
         text = "\n\n".join(blocks)
 
@@ -63,7 +64,7 @@ class PPTXParser(Parser):
         slide,
         slide_num: int,
         prs,
-        blob_counts: dict[str, int],
+        digest_pages: dict[str, set[int]],
         images: list[ImageInfo],
     ) -> list[str]:
         """解析单页，返回该页的块序列（标题块在最前，备注块在最后）。"""
@@ -72,7 +73,7 @@ class PPTXParser(Parser):
 
         for shape in _iter_shapes(slide.shapes):
             if _is_picture(shape):
-                self._collect_picture(shape, slide_num, prs, blob_counts, images, body)
+                self._collect_picture(shape, slide_num, prs, digest_pages, images, body)
                 continue
             if getattr(shape, "has_table", False):
                 markdown = rows_to_markdown(
@@ -110,7 +111,7 @@ class PPTXParser(Parser):
         shape,
         slide_num: int,
         prs,
-        blob_counts: dict[str, int],
+        digest_pages: dict[str, set[int]],
         images: list[ImageInfo],
         body: list[str],
     ) -> None:
@@ -120,7 +121,7 @@ class PPTXParser(Parser):
         except Exception:  # noqa: BLE001
             return
         digest = hashlib.sha256(blob).hexdigest()
-        if blob_counts.get(digest, 0) >= _LOGO_REPEAT_THRESHOLD:
+        if len(digest_pages.get(digest, ())) >= _LOGO_REPEAT_THRESHOLD:
             return
         if (
             shape.width
